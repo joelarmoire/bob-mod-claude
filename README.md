@@ -10,7 +10,9 @@
 
 Claude finishes a 3D helicopter in Blender, paints it, uploads it to a game and plans a police chase. The mod says each step in a few words, and questions and approvals are answered from the panel.
 
-▶ [Full demo with sound (2:29)](media/demo.mp4)
+**Full demo with sound (2:29):**
+
+https://github.com/user-attachments/assets/7d6c1697-c564-4a9c-ba90-70a0a1e5eb8b
 
 ## What it does
 
