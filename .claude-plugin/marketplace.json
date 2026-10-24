@@ -1,5 +1,13 @@
 {
-  "name": "bob-mod-claude",
-  "owner": { "name": "joelarmoire" },
-  "plugins": [{ "name": "bob-mod-claude", "source": "./" }]
+  "name": "bob-talks-back",
+  "description": "Claude talks back: voice and captions for Claude, with questions and approvals in a panel",
+  "owner": {
+    "name": "joelarmoire"
+  },
+  "plugins": [
+    {
+      "name": "bob-talks-back",
+      "source": "./"
+    }
+  ]
 }

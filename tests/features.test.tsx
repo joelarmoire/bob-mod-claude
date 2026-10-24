@@ -5,7 +5,7 @@ const long = (text: string) => `${text} ${'There is more detail in the full repl
 import type { On } from 'claude-code'
 
 const BAND = {
-  plugin: 'bob-mod-claude',
+  plugin: 'bob-talks-back',
   component: 'AbovePrompt',
   requestId: 'above-prompt',
   props: {
@@ -328,7 +328,7 @@ test('10. the chat row Bob is still saying stays one quiet line', async ($, on) 
   await $.session.append(says('A long reply that Bob is about to say out loud.'))
   await clock.advance(100)
   const row = await $.ui.mount({
-    plugin: 'bob-mod-claude',
+    plugin: 'bob-talks-back',
     component: 'AssistantMessage',
     requestId: 'm1',
     surface: 'desktop',
@@ -348,7 +348,7 @@ test('11. fix: a reply saved by the older Bob no longer shows an empty QUESTION 
     plan: [], steps: [], seconds: 12, prompt: 'older prompt',
   }
   on('state.get', ($, e, next) =>
-    e.plugin === 'bob-mod-claude' && e.key === 'reply' ? { value: { value: older, version: 1 } } : next(e),
+    e.plugin === 'bob-talks-back' && e.key === 'reply' ? { value: { value: older, version: 1 } } : next(e),
   )
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
@@ -972,7 +972,7 @@ test('42. a click that reaches Claude late is dropped, never sent after you move
   await clock.advance(30_000)
   // You type something else; then the app delivers an old click of the panel's.
   await $.prompt.submit({ text: 'something else' })
-  const late = await $.prompt.submit({ text: 'Yes', origin: { kind: 'plugin', name: 'bob-mod-claude' } } as never)
+  const late = await $.prompt.submit({ text: 'Yes', origin: { kind: 'plugin', name: 'bob-talks-back' } } as never)
   expect('drop' in late && late.drop).toBeTruthy()
   expect(prompts).not.toContain('Yes')
 })

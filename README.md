@@ -1,8 +1,8 @@
-# bob-mod-claude
+# bob-talks-back: a mod for Claude
 
 **Claude talks back.** A mod for the Claude desktop app (Code tab). It says each reply out loud in a few words and shows it as big captions, with the spoken word highlighted. You glance, you hear the gist, you keep working. The full reply is still in the chat when you want it.
 
-> **Beta.** bob-mod-claude reads you the gist of each reply and puts questions and approvals in a panel, so you don't have to read everything. It can leave out details. For anything important, like code changes, warnings or costs, glance at the full reply in the chat.
+> **Beta.** bob-talks-back reads you the gist of each reply and puts questions and approvals in a panel, so you don't have to read everything. It can leave out details. For anything important, like code changes, warnings or costs, glance at the full reply in the chat.
 
 ## See it
 
@@ -31,9 +31,9 @@ https://github.com/user-attachments/assets/7d6c1697-c564-4a9c-ba90-70a0a1e5eb8b
 **Easiest: copy this and send it to Claude** (the Claude desktop app's Code tab, or Claude Code in a terminal):
 
 ```text
-Install the bob-mod-claude mod for me (Claude talks back, with voice and captions). Run this in the terminal:
+Install the bob-talks-back mod for me (Claude talks back, with voice and captions). Run this in the terminal:
 
-"${CLAUDE_CODE_EXECPATH:-claude}" plugin install bob-mod-claude --marketplace joelarmoire/bob-mod-claude --scope user --config voice=ash
+"${CLAUDE_CODE_EXECPATH:-claude}" plugin install bob-talks-back --marketplace joelarmoire/bob-mod-claude --scope user --config voice=ash
 
 When it's done, tell me to open a new chat: the mod turns on there, talking with the Mac's free voice.
 Then ask me if I want to keep the free voice or set up an OpenAI voice. If I want OpenAI:
@@ -46,10 +46,10 @@ Then ask me if I want to keep the free voice or set up an OpenAI voice. If I wan
 **Or by hand.** In a terminal:
 
 ```
-claude plugin install bob-mod-claude --marketplace joelarmoire/bob-mod-claude
+claude plugin install bob-talks-back --marketplace joelarmoire/bob-mod-claude
 ```
 
-At the prompt of a terminal `claude` session it's `/plugin install bob-mod-claude --marketplace joelarmoire/bob-mod-claude`. In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `joelarmoire/bob-mod-claude`, then **Add plugin**.
+At the prompt of a terminal `claude` session it's `/plugin install bob-talks-back --marketplace joelarmoire/bob-mod-claude`. In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `joelarmoire/bob-mod-claude`, then **Add plugin**.
 
 Then open a new chat.
 

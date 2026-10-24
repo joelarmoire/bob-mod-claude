@@ -4,7 +4,7 @@ import { expect, mock, test } from 'claude-code/testing'
 const long = (text: string) => `${text} ${'There is more detail in the full reply here. '.repeat(4)}`
 
 const BAND = {
-  plugin: 'bob-mod-claude',
+  plugin: 'bob-talks-back',
   component: 'AbovePrompt',
   requestId: 'above-prompt',
   props: {
@@ -18,7 +18,7 @@ const BAND = {
 } as const
 
 const PANE = {
-  plugin: 'bob-mod-claude',
+  plugin: 'bob-talks-back',
   component: 'Pane',
   requestId: 'bob',
   props: {

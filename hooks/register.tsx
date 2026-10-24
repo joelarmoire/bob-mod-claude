@@ -3,9 +3,9 @@ import type { EngineInterface, Register, RenderChildren, Timer } from 'claude-co
 
 import type { CaptionLine, Choice, Opened, PanelAsk, PlanItem, Reply, Settings } from '../types'
 
-const reply = atom({ plugin: 'bob-mod-claude', key: 'reply' } as const, null)
-const owner = atom({ plugin: 'bob-mod-claude', key: 'owner' } as const, '')
-const settings = atom({ plugin: 'bob-mod-claude', key: 'settings' } as const, {
+const reply = atom({ plugin: 'bob-talks-back', key: 'reply' } as const, null)
+const owner = atom({ plugin: 'bob-talks-back', key: 'owner' } as const, '')
+const settings = atom({ plugin: 'bob-talks-back', key: 'settings' } as const, {
   isOn: true,
   isVoiceOn: true,
   isCardInPane: false,
@@ -18,7 +18,7 @@ const STORE_KEY = 'settings-v2'
 const IDLE_WORDS = ['Thinking', 'Cooking']
 const PACE_KEY = 'say-pace'
 // Diagnostics while Bob is being tuned: what he heard, said and drew.
-const LOG_PATH = '/tmp/bob-mod-claude.log'
+const LOG_PATH = '/tmp/bob-talks-back.log'
 const MAX_WORDS = 6
 // A reply this short is spoken word for word instead of summarized.
 const SHORT_REPLY_WORDS = 25
@@ -2577,7 +2577,7 @@ export const register: Register = (on, options) => {
     }
 
     // A click's answer: already shown; sent only while still current.
-    if (origin?.kind === 'plugin' && origin.name === 'bob-mod-claude') {
+    if (origin?.kind === 'plugin' && origin.name === 'bob-talks-back') {
       const now = await read($, reply)
       const pending = pendingAnswer
       const isFresh =
@@ -2815,7 +2815,7 @@ export const register: Register = (on, options) => {
       sections: [
         ...composed.sections,
         {
-          id: 'bob-mod-claude:ask-in-words',
+          id: 'bob-talks-back:ask-in-words',
           text:
             'When you need the user, ask in plain words at the end of your reply. When you call mcp__ccd_turn__wrap_up, ' +
             'leave out `blocked`, `ask` and `actions`: the app would put its own box over the captions panel.',

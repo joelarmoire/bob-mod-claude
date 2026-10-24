@@ -88,6 +88,6 @@ export type Settings = {
 declare module 'claude-code' {
   interface PluginState {
     // owner: this chat's name on the shared voice lock, the same across reloads.
-    'bob-mod-claude': { reply: Reply | null; settings: Settings; owner: string }
+    'bob-talks-back': { reply: Reply | null; settings: Settings; owner: string }
   }
 }
