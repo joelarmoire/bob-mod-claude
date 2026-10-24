@@ -118,7 +118,7 @@ const PANEL_TOOL = 'mcp__bob-talks-back__panel'
 const PANEL_TOOL_SPEC = {
   name: 'panel',
   description:
-    "Hands the user's voice panel what to show and say for this reply. Call it once, as the very last thing in every reply to the user.",
+    "Hands the user's voice panel what to show and say for this reply. Call it once per reply, right before you write your final message to the user.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -133,7 +133,7 @@ const PANEL_TOOL_SPEC = {
   isDeferred: false,
 }
 const PANEL_TOOL_NOTE = [
-  `End every reply to the user by calling the ${PANEL_TOOL} tool once, as the very last thing (before mcp__ccd_turn__wrap_up when you use it), and write nothing after it.`,
+  `Once per reply, call the ${PANEL_TOOL} tool right before you write your final message to the user (after any other tools), then write that message. Its line must match what the message says.`,
   'tag: Question: when you ask the user something, Needs you: only when the work is waiting on the user right now, Done: when the work is finished, Update: otherwise, then at most 10 words.',
   'say: one or two short sentences, at most 30 words, with what matters most to the user right now; when the reply has something to copy, a file or link to open, or a step to do outside the chat, say so.',
   'points: one short line for each other new thing in the reply (at most 3), so nothing in it is missing from the panel.',
