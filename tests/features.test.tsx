@@ -46,6 +46,8 @@ type Boot = {
   lockedMs?: number
   // How long the app takes to accept a message.
   promptDelayMs?: number
+  // The summary model gives no line (it timed out).
+  gistFails?: boolean
   // The voice picked with /bob mac, normal or live; most tests run on the live one, null leaves it unpicked.
   engine?: 'mac' | 'normal' | 'live' | null
 }
@@ -54,7 +56,7 @@ type Boot = {
 // plays, runs and fetches is recorded.
 function boot(
   on: On,
-  { voice, key = false, gist = 'Done: all set.', refuses, live = false, stuck = false, heard, streamError, lockedMs = 0, promptDelayMs = 0, engine = 'live' }: Boot,
+  { voice, key = false, gist = 'Done: all set.', refuses, live = false, stuck = false, heard, streamError, lockedMs = 0, promptDelayMs = 0, gistFails = false, engine = 'live' }: Boot,
 ) {
   const clock = mock.clock(on)
   mock.store(on, { 'settings-v2': { isOn: true, isVoiceOn: voice, ...(engine === null ? {} : { voiceEngine: engine }) } })
@@ -156,9 +158,9 @@ function boot(
       },
     }
   })
-  on('model.complete', () => ({
+  on('model.complete', () => (gistFails ? { value: { isAnswered: false as const, reason: 'aborted' as const } } : {
     value: {
-      isAnswered: true,
+      isAnswered: true as const,
       text: gist,
       usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
     },
@@ -1080,4 +1082,20 @@ test('48. a short reply never says its first sentence twice', async ($, on) => {
   const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-1) ?? '')
   expect(said.filter(one => one.includes('No, put the normal one on X.'))).toHaveLength(1)
   expect(said.some(one => one.includes('The vertical ones are for TikTok and Shorts.'))).toBe(true)
+})
+
+test('49. when the summary never comes, the end of the reply is said, not just its opening', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true, gistFails: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'will it go viral?' })
+  const reply =
+    'You are probably right, five hundred views is not viral yet. It is still good for your account. ' +
+    'Nobody joined because the video gives them nowhere to go. Reply under the stunt with the link before tonight.'
+  await $.session.append(says(reply))
+  await clock.advance(6000)
+  await $.turn.complete({ answer: reply, durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-1) ?? '')
+  expect(said.some(one => one.includes('Reply under the stunt with the link before tonight.'))).toBe(true)
 })

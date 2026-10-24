@@ -1070,7 +1070,8 @@ async function summarize(
     system: GIST_SYSTEM,
     prompt: `${answer.slice(0, 6000)}${heard}`,
     maxTokens: 500,
-    timeoutMs: 8000,
+    // A maximum, not a wait: the summary usually lands in 4 to 8 s, and a slow one gets until 15 s.
+    timeoutMs: 15_000,
   })
   if (!result.isAnswered) {
     log($, `gist: no line (${result.reason})`)
@@ -1120,6 +1121,16 @@ function shortSummary(answer: string) {
   return { gist: `Done: ${plain}`, say: plain, points: [], options: [] }
 }
 
+// When the summary never comes, the reply's own ending stands in for it: that
+// is where the ask or the next step usually is, not the opening already said.
+function fallbackSummary(answer: string) {
+  const sentences = toPlain(answer).replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s+/).filter(one => one !== '')
+  const last = sentences.at(-1)
+  if (last === undefined) return undefined
+  if (last.endsWith('?')) return { gist: `Question: ${last}`, say: sentences.at(-2) ?? '', points: [], options: [] }
+  return { gist: `Update: ${last}`, say: sentences.slice(-2).join(' '), points: [], options: [] }
+}
+
 async function finishReply($: EngineInterface, id: number, answer: string, isAborted: boolean) {
   const quick = isAborted ? undefined : shortSummary(answer)
   const said = await read($, reply).then(now => {
@@ -1128,10 +1139,13 @@ async function finishReply($: EngineInterface, id: number, answer: string, isAbo
     const end = now.word >= 0 ? sentenceAt(now.lines, now.line).end : now.line
     return now.lines.slice(lastStart, end).flatMap(one => one.words).join(' ')
   })
-  const summary = quick ?? (isAborted || answer.trim() === '' ? undefined : await summarize($, answer, said).catch(error => {
-    log($, `gist failed: ${reasonOf(error)}`)
-    return undefined
-  }))
+  const summary =
+    quick ??
+    (isAborted || answer.trim() === '' ? undefined : await summarize($, answer, said).catch(error => {
+      log($, `gist failed: ${reasonOf(error)}`)
+      return undefined
+    })) ??
+    (isAborted || answer.trim() === '' ? undefined : fallbackSummary(answer))
   const gist = summary?.gist
   if (gist) log($, `gist: ${gist} (+${summary?.options.length ?? 0} options)`)
   // A question asked in plain words, with named options, gets them as buttons
