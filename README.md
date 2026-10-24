@@ -6,9 +6,11 @@
 
 ## See it
 
-[![Watch the demo: Claude builds a helicopter in Blender while the mod talks back](media/demo-poster.jpg)](media/demo.mp4)
+![Claude asks which color, you click Dot World yellow, and the helicopter turns yellow in Blender while the mod says it out loud](media/demo.gif)
 
-Claude finishes a 3D helicopter in Blender, paints it, uploads it to a game and plans a police chase. The mod says each step in a few words, and questions and approvals are answered from the panel. (2:29, sound on.)
+Claude finishes a 3D helicopter in Blender, paints it, uploads it to a game and plans a police chase. The mod says each step in a few words, and questions and approvals are answered from the panel.
+
+▶ [Full demo with sound (2:29)](media/demo.mp4)
 
 ## What it does
 
