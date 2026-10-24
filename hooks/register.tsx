@@ -97,6 +97,8 @@ option, at most 4, like "> Brewing": the option itself in at most 4 words,
 as the user would answer it.
 Speak as Claude, the assistant, in the first person ("I fixed..."); never use
 any other name for it.
+Keep who does what exactly as in the reply: "you" is the user, "I" is the
+assistant; never swap them.
 Answer with those lines alone.`
 const CLAUDE_ORANGE = '#D97757'
 // One accent only: the spoken word and a reply that needs you wear Claude's orange.

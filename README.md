@@ -75,6 +75,18 @@ Inside `hooks/register.tsx`, the main pieces:
 - `panelAskOf` turns a question, permission or plan into buttons. `answerAsk` and `decisionOf` send your answer back.
 - `synthesize` and `synthesizeLive` make the voice (OpenAI), and `findKey` finds your key.
 
+## Make it yours
+
+It's all plain code, so change whatever you like:
+
+- **What it says out loud:** the instructions for the spoken summary are `GIST_SYSTEM`, near the top of
+  `hooks/register.tsx`. Change the tone, the length or the language.
+- **The voice:** `/bob voice <name>`, or the voice option in the plugin's settings; `/bob style` for the delivery.
+- **The sounds:** swap the files in `sounds/`.
+- **The panel:** its colors (`CLAUDE_ORANGE`) and the "working" words (`IDLE_WORDS`) are in `hooks/register.tsx`.
+
+After a change, `claude plugin test .` checks that everything still works.
+
 ## Requirements
 
 macOS and the Claude desktop app.
