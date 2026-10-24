@@ -46,16 +46,18 @@ type Boot = {
   lockedMs?: number
   // How long the app takes to accept a message.
   promptDelayMs?: number
+  // The voice picked with /bob mac, normal or live; most tests run on the live one, null leaves it unpicked.
+  engine?: 'mac' | 'normal' | 'live' | null
 }
 
 // A session with Bob loaded and everything beneath him stood in for: what he
 // plays, runs and fetches is recorded.
 function boot(
   on: On,
-  { voice, key = false, gist = 'Done: all set.', refuses, live = false, stuck = false, heard, streamError, lockedMs = 0, promptDelayMs = 0 }: Boot,
+  { voice, key = false, gist = 'Done: all set.', refuses, live = false, stuck = false, heard, streamError, lockedMs = 0, promptDelayMs = 0, engine = 'live' }: Boot,
 ) {
   const clock = mock.clock(on)
-  mock.store(on, { 'settings-v2': { isOn: true, isVoiceOn: voice } })
+  mock.store(on, { 'settings-v2': { isOn: true, isVoiceOn: voice, ...(engine === null ? {} : { voiceEngine: engine }) } })
   mock.env(on, {})
   const sounds: string[] = []
   const runs: string[][] = []
@@ -1031,4 +1033,35 @@ test('45. Retry after a stop: your message goes straight in the box, never stuck
   expect((await band.find({ type: 'Text', text: /Press Enter to retry/ }))?.text).toBe('Stopped. Press Enter to retry.')
   expect(await band.find({ type: 'Text', text: /^(Thinking|Cooking)$/ })).toBeUndefined()
   await band.unmount()
+})
+
+test('46. out of the box the free Mac voice speaks, even with an OpenAI key', async ($, on) => {
+  const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'hello' })
+  await $.session.append(says('Working on it.'))
+  await $.turn.complete({ answer: long('Working on it.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(20_000)
+
+  expect(fetches).toHaveLength(0)
+  expect(runs.some(argv => argv.some(arg => arg.endsWith('realtime-stream.mjs') || arg.endsWith('realtime-voice.mjs')))).toBe(false)
+  expect(runs.some(argv => argv[0] === 'say')).toBe(true)
+})
+
+test('47. /bob normal speaks with OpenAI text-to-speech, /bob live with the live voice, /bob mac back to free', async ($, on) => {
+  const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  expect(JSON.stringify(await $.command.run({ command: 'bob', args: 'normal' }))).toContain("OpenAI's normal voice")
+  await $.prompt.submit({ text: 'hello' })
+  await $.session.append(says('Working on it.'))
+  await $.turn.complete({ answer: long('Working on it.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(20_000)
+  expect(fetches.some(one => one.startsWith('https://api.openai.com/v1/audio/speech'))).toBe(true)
+  expect(runs.some(argv => argv.some(arg => arg.endsWith('realtime-stream.mjs')))).toBe(false)
+
+  expect(JSON.stringify(await $.command.run({ command: 'bob', args: 'live' }))).toContain("OpenAI's live voice")
+  expect(JSON.stringify(await $.command.run({ command: 'bob', args: '' }))).toContain("OpenAI's live voice")
+  expect(JSON.stringify(await $.command.run({ command: 'bob', args: 'mac' }))).toContain("the Mac's own voice (free)")
+  expect(JSON.stringify(await $.command.run({ command: 'bob', args: '' }))).toContain("the Mac's own voice (free)")
 })

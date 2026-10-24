@@ -75,6 +75,8 @@ export type Settings = {
   isVoiceOn: boolean
   isCardInPane: boolean
   isCompact: boolean
+  // Which voice speaks: mac (free, the default), normal or live (OpenAI). Set with /bob mac, normal or live.
+  voiceEngine?: 'mac' | 'normal' | 'live'
   // The OpenAI voice you picked with /bob voice <name>; empty for the default.
   voiceName?: string
   // How the live voice delivers: pro (brisk, articulate) or narrator (slower).

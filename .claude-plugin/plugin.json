@@ -8,7 +8,7 @@
     "voice": {
       "type": "string",
       "title": "OpenAI voice",
-      "description": "The OpenAI voice used when OPENAI_API_KEY is set",
+      "description": "The OpenAI voice for /bob normal and /bob live",
       "default": "ash",
       "options": [
         "alloy",

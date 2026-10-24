@@ -156,6 +156,26 @@ const OPENAI_WAIT_MS = 5000
 // The live voice: OpenAI's Realtime model through a small Node helper.
 const LIVE_HELPER = ($: EngineInterface) => `${$.plugin.root}/helpers/realtime-voice.mjs`
 const LIVE_MODEL = 'gpt-realtime-2.1'
+// Which voice speaks, picked with /bob mac, /bob normal or /bob live:
+// - mac: the Mac's own voice. Free, needs nothing, and the default.
+// - normal: OpenAI's text-to-speech voice (gpt-4o-mini-tts). Cheap; each line starts a beat later.
+// - live: OpenAI's realtime voice, streamed: starts at once and lights each word as it is said (the demo's voice).
+// The two OpenAI voices need a key; without one the Mac's voice speaks.
+type VoiceEngine = 'mac' | 'normal' | 'live'
+const VOICE_ENGINES: readonly string[] = ['mac', 'normal', 'live']
+const ENGINE_NAMES: Record<VoiceEngine, string> = {
+  mac: "the Mac's own voice (free)",
+  normal: "OpenAI's normal voice",
+  live: "OpenAI's live voice",
+}
+async function engineOf($: EngineInterface): Promise<VoiceEngine> {
+  const picked = (await read($, settings)).voiceEngine
+  return picked === 'normal' || picked === 'live' ? picked : 'mac'
+}
+// The OpenAI key, only while one of the OpenAI voices is picked.
+async function openAiKey($: EngineInterface): Promise<string | undefined> {
+  return (await engineOf($)) === 'mac' ? undefined : findKey($)
+}
 const NODE_PATH = '/usr/bin/env'
 const LIVE_WAIT_MS = 12_000
 // The streamed live voice, and the pace it is learned to speak at (ms per
@@ -696,7 +716,7 @@ async function findKey($: EngineInterface): Promise<string | undefined> {
 // OpenAI's voice when a key is found; undefined sends the sentence to
 // the system voice instead.
 async function synthesize($: EngineInterface, text: string, asVoice?: string): Promise<Speech | undefined> {
-  const key = await findKey($)
+  const key = await openAiKey($)
   if (!key) {
     log($, 'voice: no OpenAI key found, using the system voice')
     return undefined
@@ -1176,12 +1196,12 @@ async function finishReply($: EngineInterface, id: number, answer: string, isAbo
 // the speech model is asked too, and the first take back wins. Past
 // VOICE_DEADLINE_MS the line goes to the Mac voice, so silence never runs long.
 async function speakable($: EngineInterface, text: string): Promise<Speech | undefined> {
-  // One voice only: the live one. No second voice is asked in parallel, so a
-  // line is never paid twice and never heard in a different voice; if the live
-  // one fails or is too slow, the line shows silently (its take, still being
-  // made, lands in the helper's cache for next time).
+  // One voice only, the one picked (live or normal). No second voice is asked
+  // in parallel, so a line is never paid twice and never heard in a different
+  // voice; if it fails or is too slow, the line shows silently (a live take
+  // still being made lands in the helper's cache for next time).
   const got = await Promise.race([
-    synthesizeLive($, text),
+    (await engineOf($)) === 'live' ? synthesizeLive($, text) : synthesize($, text),
     wait($, VOICE_DEADLINE_MS).then(() => 'timeout' as const),
   ])
   if (got === 'timeout') {
@@ -1195,7 +1215,7 @@ async function speakable($: EngineInterface, text: string): Promise<Speech | und
 // OpenAI's Realtime connection, which a mod cannot open itself.
 async function synthesizeLive($: EngineInterface, text: string, asVoice?: string): Promise<Speech | undefined> {
   // No key: the line goes to the system voice, never to OpenAI.
-  if ((await findKey($)) === undefined) return undefined
+  if ((await openAiKey($)) === undefined) return undefined
   try {
     const { voiceStyle } = await read($, settings)
     const style = typeof voiceStyle === 'string' && VOICE_STYLES.includes(voiceStyle) ? voiceStyle : 'narrator'
@@ -1239,9 +1259,16 @@ async function synthesizeLive($: EngineInterface, text: string, asVoice?: string
 
 // The same short line in each candidate voice, named in a popup as it plays.
 async function playSamples($: EngineInterface) {
+  const engine = await engineOf($)
+  if (engine === 'mac') {
+    $.ui.toast('These are OpenAI voices: pick /bob normal or /bob live first.')
+    return
+  }
   for (const name of SAMPLE_VOICES) {
     const line = `Hi, I'm Claude, in the ${name} voice. This is how I would sound.`
-    const speech = (await synthesizeLive($, line, name)) ?? (await synthesize($, line, name).catch(() => undefined))
+    const speech =
+      (engine === 'live' ? await synthesizeLive($, line, name) : undefined) ??
+      (await synthesize($, line, name).catch(() => undefined))
     const path = speech?.path ?? (speech?.base64 !== undefined && (await saveClip($, speech.base64)) ? clipPath() : undefined)
     if (speech === undefined || path === undefined) {
       $.ui.toast(`${name}: no sample (see the captions log)`)
@@ -1306,7 +1333,7 @@ async function play($: EngineInterface) {
 
       // With OpenAI reachable, the line is streamed: the voice starts as soon
       // as the first sound arrives, and the words light up with it.
-      if (isVoiceOn && (await findKey($)) !== undefined) {
+      if (isVoiceOn && (await engineOf($)) === 'live' && (await findKey($)) !== undefined) {
         const isForYou =
           needsYou(sentence.text) ||
           (current.lines[current.line]?.spoken === true && isFinal && sentence.text.trim().endsWith('?'))
@@ -1355,7 +1382,7 @@ async function play($: EngineInterface) {
       const linePath = speech?.path ?? clipPath()
       // The Mac's own voice is a different person: with OpenAI reachable, a
       // line OpenAI could not voice in time shows as a silent caption instead.
-      const hasOpenAi = isVoiceOn && speech === undefined && (await findKey($)) !== undefined
+      const hasOpenAi = isVoiceOn && speech === undefined && (await openAiKey($)) !== undefined
       if (hasOpenAi) log($, `voice: no take for #${current.line} in time, showing it silently`)
       // Whether this line is heard at all: a silent caption runs on its own clock.
       const speaks = isVoiceOn && !hasOpenAi
@@ -2483,6 +2510,15 @@ export const register: Register = (on, options) => {
       const { syncMs } = await read($, settings)
       return { text: `Highlight ${nudge}: now ${syncMs} ms against the voice.` }
     }
+    if (VOICE_ENGINES.includes(arg)) {
+      const engine = arg as VoiceEngine
+      voiceCache.clear()
+      await saveSettings($, now => ({ ...now, voiceEngine: engine }))
+      if (engine !== 'mac' && (await findKey($)) === undefined) {
+        return { text: `Claude will speak with ${ENGINE_NAMES[engine]} once your OpenAI key is in ~/.config/bob/openai.env. Until then it's the Mac's voice.` }
+      }
+      return { text: `Claude now speaks with ${ENGINE_NAMES[engine]}.` }
+    }
     if (arg === 'voices') {
       $.clock.after(0, () => void playSamples($))
       return { text: `Playing ${SAMPLE_VOICES.join(', ')}, one after another. Pick one with /bob voice <name>.` }
@@ -2517,9 +2553,10 @@ export const register: Register = (on, options) => {
     }
 
     const { isOn, isVoiceOn } = await read($, settings)
-    const hasKey = (await findKey($)) !== undefined
+    const engine = await engineOf($)
+    const speaking = engine === 'mac' || (await findKey($)) === undefined ? ENGINE_NAMES.mac : `${ENGINE_NAMES[engine]}, ${voice}`
     return {
-      text: `Captions ${isOn ? 'on' : 'off'}, voice ${isVoiceOn ? 'on' : 'off'} (${hasKey ? `OpenAI ${voice}` : 'macOS system voice'}). Use /bob on, off, voice, skip or all.`,
+      text: `Captions ${isOn ? 'on' : 'off'}, voice ${isVoiceOn ? 'on' : 'off'} (${speaking}). Use /bob on, off, voice, mac, normal, live, skip or all.`,
     }
   })
 

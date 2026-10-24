@@ -10,13 +10,14 @@
 
 Claude finishes a 3D helicopter in Blender, paints it, uploads it to a game and plans a police chase. The mod says each step in a few words, and questions and approvals are answered from the panel.
 
-**Full demo with sound (2:29):**
+**Full demo with sound (2:29).** The demo uses OpenAI's live voice (`/bob live`); out of the box the mod speaks with the Mac's own free voice.
 
 https://github.com/user-attachments/assets/7d6c1697-c564-4a9c-ba90-70a0a1e5eb8b
 
 ## What it does
 
 - **Speaks the point, not the wall of text.** Each reply becomes one or two short spoken lines; short replies are said word for word.
+- **Three voices:** the Mac's own voice, free and on by default, or OpenAI's normal or live voice with your key (`/bob mac`, `/bob normal`, `/bob live`).
 - **Captions, one phrase at a time,** with the word being spoken highlighted.
 - **Clear states:** working, QUESTION FOR YOU, NEEDS YOU and DONE, each with its own tag and sound.
 - **Answer from the panel.** Questions show as buttons, one at a time. Permission prompts get Allow and Deny. Plans get Approve and Keep planning.
@@ -43,24 +44,31 @@ In the desktop app, where `/plugin` does not run: click **+** next to the prompt
 
 ## Voice
 
-- **With an OpenAI key** it uses OpenAI's live voice (`ash` by default). Put your key in `~/.config/bob/openai.env`:
+Three voices. Pick one with a command; the choice is remembered.
 
-  ```
-  OPENAI_API_KEY=sk-...
-  ```
+| Command | Voice | Cost | Feel |
+|---|---|---|---|
+| `/bob mac` | The Mac's own voice (**default**) | Free | Works out of the box, nothing to set up. |
+| `/bob normal` | OpenAI text-to-speech (`gpt-4o-mini-tts`) | Cheap | Natural voice; each line starts a beat later. |
+| `/bob live` | OpenAI live voice (`gpt-realtime`) | Costs more | Starts at once, every word lights up as it's said. **This is the voice in the demo.** |
 
-  The key is read from that file only and is never printed. Node must be installed (`node` on your PATH).
-- **Without a key** it uses the Mac's built-in voice, so it works out of the box.
+The two OpenAI voices need your OpenAI key in `~/.config/bob/openai.env`:
+
+```
+OPENAI_API_KEY=sk-...
+```
+
+The key is read from that file only and is never printed. The live voice also needs Node (`node` on your PATH). Without a key, the Mac's voice speaks whatever you picked. `/bob voice <name>` picks the OpenAI voice (`ash` by default) and `/bob voices` plays them.
 
 ## Commands
 
-`/bob on` · `/bob off` · `/bob voices` (hear the voices) · `/bob voice <name>` · `/bob style` · `/bob sync earlier|later` · `/bob skip` · `/bob all`
+`/bob on` · `/bob off` · `/bob mac` · `/bob normal` · `/bob live` · `/bob voices` (hear the OpenAI voices) · `/bob voice <name>` · `/bob style` · `/bob sync earlier|later` · `/bob skip` · `/bob all`
 
 ## How it works
 
 1. **It listens to the chat.** As Claude writes, each message comes in (`session.append`) and is split into caption lines. Tool calls (`tool.call`) tell it what Claude is doing, and the task list follows Claude's plan updates.
 2. **It finds the gist.** When a turn ends (`turn.complete`), a small, fast model (Claude Haiku) sums the reply up in a line or two and pulls out any question and its options.
-3. **It speaks.** Each line goes to OpenAI's live voice, streamed so it starts at once. The voice reports when each word is spoken, so the captions highlight in sync. With no key, the Mac's own voice reads it.
+3. **It speaks.** By default the Mac's own voice reads each line. With `/bob live`, each line goes to OpenAI's live voice, streamed so it starts at once, and the voice reports when each word is spoken so the captions highlight in sync. With `/bob normal`, OpenAI's text-to-speech reads it, and the highlight follows the voice's pauses.
 4. **It draws the panel** above the message box (`ui.render` for `AbovePrompt`): the orb, the captions, the status, and the card with the reply, the buttons and the time.
 5. **It answers for you.** Claude's questions, permission prompts and plan approvals are caught as they happen (`classic.PermissionRequest`), shown as buttons, and your click goes back to Claude exactly as the app's own dialog would send it.
 6. **It keeps itself visible.** The app's own "next step" box would cover the panel, so a short note in Claude's instructions (`prompt.compose`) asks it to put questions in plain words instead.
@@ -75,7 +83,7 @@ In the desktop app, where `/plugin` does not run: click **+** next to the prompt
 | `helpers/realtime-voice.mjs` | Reads one line with OpenAI's live voice and writes a WAV, with the time of each word. Takes are cached in `~/.cache/bob-voice`. |
 | `helpers/realtime-stream.mjs` | The streamed version: the voice starts as soon as the first sound arrives. |
 | `sounds/*.wav` | The send, working, question and done sounds. |
-| `tests/*.test.tsx` | 48 tests covering every feature. Run them with `claude plugin test .` |
+| `tests/*.test.tsx` | 50 tests covering every feature. Run them with `claude plugin test .` |
 
 Inside `hooks/register.tsx`, the main pieces:
 
@@ -83,7 +91,7 @@ Inside `hooks/register.tsx`, the main pieces:
 - `summarize` asks the small model for the gist and any question.
 - `drawStage` draws the panel, `card` the finished reply, and `askButtons` the answer buttons.
 - `panelAskOf` turns a question, permission or plan into buttons. `answerAsk` and `decisionOf` send your answer back.
-- `synthesize` and `synthesizeLive` make the voice (OpenAI), and `findKey` finds your key.
+- `engineOf` says which voice is picked (`/bob mac`, `normal` or `live`). `synthesize` (normal) and `synthesizeLive` (live) make the OpenAI voice, `say` the Mac's, and `findKey` finds your key.
 
 ## Make it yours
 
@@ -91,7 +99,7 @@ It's all plain code, so change whatever you like:
 
 - **What it says out loud:** the instructions for the spoken summary are `GIST_SYSTEM`, near the top of
   `hooks/register.tsx`. Change the tone, the length or the language.
-- **The voice:** `/bob voice <name>`, or the voice option in the plugin's settings; `/bob style` for the delivery.
+- **The voice:** `/bob mac`, `/bob normal` or `/bob live` for which voice speaks; `/bob voice <name>`, or the voice option in the plugin's settings, for which OpenAI voice; `/bob style` for the delivery.
 - **The sounds:** swap the files in `sounds/`.
 - **The panel:** its colors (`CLAUDE_ORANGE`) and the "working" words (`IDLE_WORDS`) are in `hooks/register.tsx`.
 
