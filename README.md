@@ -2,6 +2,26 @@
 
 **Claude talks back.** A mod for the Claude desktop app (Code tab). It says each reply out loud in a few words and shows it as big captions, with the spoken word highlighted. You glance, you hear the gist, you keep working. The full reply is still in the chat when you want it.
 
+**Install in one step:** copy this, send it to Claude (the desktop app's Code tab, or Claude Code in a terminal), and allow the command when it asks.
+
+```text
+Install the Claude mod bob-talks-back for me. Run:
+
+"${CLAUDE_CODE_EXECPATH:-claude}" plugin install bob-talks-back \
+  --marketplace joelarmoire/bob-mod-claude --config voice=ash
+
+Then tell me to open a new chat: the mod starts there with the
+Mac's free voice. Ask if I want to keep it or set up an OpenAI
+voice. If I want OpenAI:
+1. Send me to https://platform.openai.com/api-keys for a key.
+2. Run: mkdir -p ~/.config/bob && touch ~/.config/bob/openai.env
+   && open -e ~/.config/bob/openai.env
+   Tell me to paste OPENAI_API_KEY=my-key there and save.
+   Never ask me to paste the key in the chat.
+3. Tell me to type /bob normal (cheaper) or /bob live (the voice
+   in the demo) in the new chat.
+```
+
 > **Beta.** bob-talks-back reads you the gist of each reply and puts questions and approvals in a panel, so you don't have to read everything. It can leave out details. For anything important, like code changes, warnings or costs, glance at the full reply in the chat.
 
 ## See it
@@ -28,22 +48,9 @@ https://github.com/user-attachments/assets/7d6c1697-c564-4a9c-ba90-70a0a1e5eb8b
 
 ## Install
 
-**Easiest: copy this and send it to Claude** (the Claude desktop app's Code tab, or Claude Code in a terminal):
+**Easiest:** send Claude the prompt at the top of this page.
 
-```text
-Install the bob-talks-back mod for me (Claude talks back, with voice and captions). Run this in the terminal:
-
-"${CLAUDE_CODE_EXECPATH:-claude}" plugin install bob-talks-back --marketplace joelarmoire/bob-mod-claude --scope user --config voice=ash
-
-When it's done, tell me to open a new chat: the mod turns on there, talking with the Mac's free voice.
-Then ask me if I want to keep the free voice or set up an OpenAI voice. If I want OpenAI:
-1. Tell me to get an API key at https://platform.openai.com/api-keys
-2. Run: mkdir -p ~/.config/bob && touch ~/.config/bob/openai.env && open -e ~/.config/bob/openai.env
-   and tell me to paste one line, OPENAI_API_KEY=my-key, then save. Never ask me to paste the key in the chat.
-3. Tell me that in the new chat I type /bob normal (cheaper) or /bob live (the voice in the demo, costs more).
-```
-
-**Or by hand.** In a terminal:
+**By hand.** In a terminal:
 
 ```
 claude plugin install bob-talks-back --marketplace joelarmoire/bob-mod-claude
