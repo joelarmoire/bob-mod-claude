@@ -28,19 +28,30 @@ https://github.com/user-attachments/assets/7d6c1697-c564-4a9c-ba90-70a0a1e5eb8b
 
 ## Install
 
-At the prompt of a terminal `claude` session:
+**Easiest: copy this and send it to Claude** (the Claude desktop app's Code tab, or Claude Code in a terminal):
 
-```
-/plugin install bob-mod-claude --marketplace joelarmoire/bob-mod-claude
+```text
+Install the bob-mod-claude mod for me (Claude talks back, with voice and captions). Run this in the terminal:
+
+"${CLAUDE_CODE_EXECPATH:-claude}" plugin install bob-mod-claude --marketplace joelarmoire/bob-mod-claude --scope user --config voice=ash
+
+When it's done, tell me to open a new chat: the mod turns on there, talking with the Mac's free voice.
+Then ask me if I want to keep the free voice or set up an OpenAI voice. If I want OpenAI:
+1. Tell me to get an API key at https://platform.openai.com/api-keys
+2. Run: mkdir -p ~/.config/bob && touch ~/.config/bob/openai.env && open -e ~/.config/bob/openai.env
+   and tell me to paste one line, OPENAI_API_KEY=my-key, then save. Never ask me to paste the key in the chat.
+3. Tell me that in the new chat I type /bob normal (cheaper) or /bob live (the voice in the demo, costs more).
 ```
 
-Answer `y` to add the marketplace, then pick a scope (Enter for your user). From a shell:
+**Or by hand.** In a terminal:
 
 ```
 claude plugin install bob-mod-claude --marketplace joelarmoire/bob-mod-claude
 ```
 
-In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `joelarmoire/bob-mod-claude`, then **Add plugin**.
+At the prompt of a terminal `claude` session it's `/plugin install bob-mod-claude --marketplace joelarmoire/bob-mod-claude`. In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `joelarmoire/bob-mod-claude`, then **Add plugin**.
+
+Then open a new chat.
 
 ## Voice
 
