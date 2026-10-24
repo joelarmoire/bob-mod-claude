@@ -1,0 +1,30 @@
+{
+  "name": "bob-mod-claude",
+  "version": "0.2.0",
+  "description": "Claude talks back: says each reply's gist out loud with TikTok-style captions, and puts questions and approvals in a panel (beta)",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "voice": {
+      "type": "string",
+      "title": "OpenAI voice",
+      "description": "The OpenAI voice used when OPENAI_API_KEY is set",
+      "default": "ash",
+      "options": [
+        "alloy",
+        "ash",
+        "ballad",
+        "coral",
+        "echo",
+        "fable",
+        "nova",
+        "onyx",
+        "sage",
+        "shimmer",
+        "verse",
+        "marin",
+        "cedar"
+      ]
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "name": "bob-mod-claude",
+  "owner": { "name": "joelarmoire" },
+  "plugins": [{ "name": "bob-mod-claude", "source": "./" }]
+}
