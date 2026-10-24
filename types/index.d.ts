@@ -68,6 +68,8 @@ export type Reply = {
   voiceNote?: string
   // The command last put on your clipboard from the card.
   copied?: string
+  // The text to copy whose Show was pressed: it stays open in the panel until hidden.
+  shownCopy?: string
 }
 
 export type Settings = {

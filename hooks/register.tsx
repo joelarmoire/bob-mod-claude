@@ -109,15 +109,20 @@ Answer with those lines alone.`
 // of each reply, written as markdown reference lines, which the chat does not show. The summary model only steps in
 // without one.
 const NOTE_LINE = /^\s*\[bob-(tag|say|option(?:-\d+)?)\]:\s*#\s*"(.*)"\s*$/
+// One line, so the chat hides all of it (a third reference line showed up as text).
+const NOTE_ONE = /^\s*\[bob\]:\s*#\s*"(.*)"\s*$/
 const SPOKEN_NOTE = [
-  "End every reply with a short hidden note for the user's voice panel: a blank line, then these lines, as the very last thing.",
+  "End every reply with a hidden note for the user's voice panel: a blank line, then exactly these two lines, as the very last thing.",
   '[bob-tag]: # "Done: what got done, in at most 10 words"',
-  '[bob-say]: # "One or two short sentences, at most 30 words, with what matters most to the user right now: the result, the decision or the next step"',
-  '[bob-option-1]: # "An option"',
-  'The tag starts with Question: when you ask the user something, Needs you: only when the work is waiting on the user right now, Done: when the work is finished, Update: otherwise.',
-  'Add [bob-option-1] to [bob-option-4] (each at most 4 words) only when you ask the user to pick between named options.',
+  '[bob-say]: # "One or two short sentences, at most 30 words, with what matters most to the user right now | Point: another part of the reply, in a few words | Copy: Tweet reply | Option: An option"',
+  'Start the tag with Question: when you ask the user something, Needs you: only when the work is waiting on the user right now, Done: when the work is finished, Update: otherwise.',
+  'In the say line, after the sentences, add up to 3 Point: parts only when the reply covers more than one thing, so nothing in it is missing from the panel.',
+  'Put anything the user should copy (a tweet, a command, a prompt) in a code block, and add a Copy: part naming each one, in order.',
+  'Add up to 4 Option: parts (each at most 4 words) only when you ask the user to pick between named options.',
+  'Link every file you made or point the user to with its path, so the panel can give it an Open button.',
+  'When the reply has something to copy, a file or link to open, or a step to do outside the chat, the sentences say so (for example: the tweet is ready to copy in the panel).',
   'The user may only hear this note, never read the reply: it must make sense on its own, so never use a word that only the reply explains (like "this link" or "that fix") without saying what it is.',
-  'Write it as you would say it to a friend: plain words, first person, nothing that is not in the reply, no double quotes inside, and no numbers or file names unless they are the point.',
+  'Write it as you would say it to a friend: plain words, first person, nothing that is not in the reply, no double quotes and no | inside the parts, and no numbers or file names unless they are the point.',
 ].join('\n')
 const CLAUDE_ORANGE = '#D97757'
 // One accent only: the spoken word and a reply that needs you wear Claude's orange.
@@ -244,6 +249,8 @@ let lastFailure: string | undefined
 let pendingAnswer: { text: string; id: number; at: number } | undefined
 let lastTurnStartAt = 0
 const logLines: string[] = []
+// The chat's folder, so a project file linked in a reply can be opened.
+let sessionCwd = ''
 const historyLines: string[] = []
 const HISTORY_PATH = LOG_PATH.replace(/\.log$/, '-history.log')
 const HISTORY_KEEP = 2000
@@ -592,6 +599,50 @@ function activityOf(tool: string, input: Record<string, unknown>): string {
 }
 
 // The commands in a reply's code blocks, each a Copy chip on the card.
+// The names Claude's note gives the things to copy ([bob-copy-1], [bob-copy-2] ...), in order.
+function copyNamesOf(markdown: string): string[] {
+  const one = markdown.split('\n').map(line => NOTE_ONE.exec(line)?.[1]).find(text => text !== undefined)
+  if (one !== undefined) return one.split(' | ').map(part => part.trim()).filter(part => part.startsWith('Copy:')).map(part => part.slice(5).trim())
+  const say = /^\s*\[bob-say\]:\s*#\s*"(.*)"\s*$/m.exec(markdown)?.[1]
+  const fromSay = (say ?? '').split(' | ').map(part => part.trim()).filter(part => part.startsWith('Copy:')).map(part => part.slice(5).trim())
+  if (fromSay.length > 0) return fromSay
+  return [...markdown.matchAll(/^\s*\[bob-copy-(\d+)\]:\s*#\s*"(.*)"\s*$/gm)]
+    .sort((a, b) => Number(a[1]) - Number(b[1]))
+    .map(match => match[2] ?? '')
+}
+
+// Files and pages the reply points to: its markdown links to a full path or a web page, and its bare web addresses
+// (outside code, which gets a Copy card instead). Each gets an Open button.
+function linksOf(markdown: string): Opened[] {
+  const found: Opened[] = []
+  const nameOf = (path: string) => path.split('/').filter(one => one !== '').pop() ?? path
+  // A full path written as code (`~/Desktop/demo.mp4`) is a file too.
+  for (const match of markdown.replace(/```[\s\S]*?```/g, '').matchAll(/`((?:~\/|\/)[^`\n]*\.[A-Za-z0-9]{1,6})`/g)) {
+    const target = match[1] ?? ''
+    found.push({ name: nameOf(target), target })
+  }
+  const prose = markdown.replace(/```[\s\S]*?```/g, '').replace(/`[^`]*`/g, '')
+  for (const match of prose.matchAll(/\[([^\]]+)\]\(([^)\s]+)\)/g)) {
+    const raw = match[2] ?? ''
+    if (/^(https?:\/\/|\/|~\/)/.test(raw)) {
+      found.push({ name: match[1] ?? raw, target: raw })
+    } else if (sessionCwd !== '' && !/^([a-z]+:|#)/i.test(raw) && /\.[A-Za-z0-9]{1,6}(:\d+)?$/.test(raw)) {
+      // A project file linked the usual way (src/app.ts or src/app.ts:42), from the chat's own folder.
+      let path = raw.replace(/:\d+$/, '')
+      try {
+        path = decodeURI(path)
+      } catch {}
+      found.push({ name: match[1] ?? raw, target: `${sessionCwd.replace(/\/$/, '')}/${path}` })
+    }
+  }
+  const linked = prose.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '')
+  for (const match of linked.matchAll(/https?:\/\/[^\s)<>\]"']+/g)) {
+    const target = match[0].replace(/[.,;:!?]+$/, '')
+    found.push({ name: target.replace(/^https?:\/\//, '').slice(0, 48), target })
+  }
+  return found.filter((one, at) => found.findIndex(other => other.target === one.target) === at).slice(0, 4)
+}
+
 function commandsOf(markdown: string): string[] {
   return [...markdown.matchAll(/```[^\n]*\n([\s\S]*?)```/g)]
     .map(match => (match[1] ?? '').trim())
@@ -1193,12 +1244,21 @@ function fallbackSummary(answer: string) {
 
 // Claude's own note at the end of the reply, when it wrote one: its tag, Say and option lines.
 function noteOf(answer: string) {
+  const one = answer.split('\n').map(line => NOTE_ONE.exec(line)?.[1]).find(text => text !== undefined)
+  if (one !== undefined) {
+    const parts = one.split(' | ').map(part => part.trim()).filter(part => part !== '')
+    const field = (name: string) => parts.filter(part => part.startsWith(`${name}:`)).map(part => part.slice(name.length + 1).trim())
+    const tag = parts.find(part => !/^(Say|Point|Copy|Option):/.test(part))
+    if (tag === undefined) return undefined
+    return parseGist([tag, `Say: ${field('Say')[0] ?? ''}`, ...field('Point').map(p => `- ${p}`), ...field('Option').map(o => `> ${o}`)].join('\n'))
+  }
   const found = answer.split('\n').map(line => NOTE_LINE.exec(line)).filter(one => one !== null)
   const tag = found.find(one => one[1] === 'tag')?.[2]
   if (tag === undefined) return undefined
-  const say = found.find(one => one[1] === 'say')?.[2] ?? ''
-  const options = found.filter(one => one[1].startsWith('option')).map(one => `> ${one[2]}`)
-  return parseGist([tag, `Say: ${say}`, ...options].join('\n'))
+  const [say = '', ...extras] = (found.find(one => one[1] === 'say')?.[2] ?? '').split(' | ').map(part => part.trim())
+  const extra = (name: string) => extras.filter(part => part.startsWith(`${name}:`)).map(part => part.slice(name.length + 1).trim())
+  const options = [...found.filter(one => one[1].startsWith('option')).map(one => one[2]), ...extra('Option')].map(one => `> ${one}`)
+  return parseGist([tag, `Say: ${say}`, ...extra('Point').map(one => `- ${one}`), ...options].join('\n'))
 }
 
 async function finishReply($: EngineInterface, id: number, answer: string, isAborted: boolean) {
@@ -1658,6 +1718,7 @@ type CardActions = {
   onChoose: (text: string) => void
   onCopy: (text: string, surface: CopySurface) => void
   onOpen: (target: string) => void
+  onShow: (text: string) => void
   onRetry: () => void
 }
 
@@ -1674,7 +1735,11 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
     .map(one => one.trim())
     .filter(one => one !== '')
   const choice = current.choice ?? null
-  const commands = commandsOf(current.blocks.map(one => one.text).join('\n\n'))
+  const whole = current.blocks.map(one => one.text).join('\n\n')
+  const commands = commandsOf(whole)
+  const copyNames = copyNamesOf(whole)
+  const openedTargets = new Set((current.opened ?? []).map(one => one.target))
+  const links = linksOf(whole).filter(one => !openedTargets.has(one.target))
   const { tag, isAsk, text } = choice !== null ? tagOf(`Question: ${choice.ask}`) : tagOf(current.gist)
   const limit = mode === 'pane' ? MAX_PROMPT : BAND_PROMPT
   // A reply that says much more than its summary gets a hint, so you know when the chat is worth a look.
@@ -1708,6 +1773,12 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
         {text !== '' ? text : (paragraphs[0] ?? '')}
       </Text>
       {!isAsk && current.say && mode !== 'brief' && <Text size="body">{current.say}</Text>}
+      {mode !== 'brief' &&
+        (current.points ?? []).map((point, at) => (
+          <Text key={`point${at}`} size="footnote" dimColor>
+            {`• ${point}`}
+          </Text>
+        ))}
       {choice !== null && choice.options.length > 0 && mode !== 'brief' && (
         <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1} marginTop={1}>
           {choice.options.map((option, at) => {
@@ -1751,26 +1822,63 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
       {mode !== 'brief' &&
         commands.map((command, at) => {
           const isCopied = current.copied === command
+          const name = copyNames[at]
+          // Show opens the whole text right in the panel, until you copy it or hide it again.
+          const isShown = current.shownCopy === command
+          const canShow = name !== undefined || command.includes('\n') || command.length > 60
           return (
-            <Box key={`copy${at}`} flexDirection="row" alignItems="center" gap={1}>
-              <Button
-                key={`copybutton${at}`}
-                variant="primary"
-                label={isCopied ? '✓ Copied' : 'Copy'}
-                onPress={press => actions.onCopy(command, press.surface)}
-              />
-              <Text size="footnote" dimColor>
-                {command.split('\n')[0]}
-                {command.includes('\n') ? ' …' : ''}
-              </Text>
+            <Box key={`copy${at}`} flexDirection="column" gap={1}>
+              <Box flexDirection="row" alignItems="center" gap={1}>
+                <Button
+                  key={`copybutton${at}`}
+                  variant="primary"
+                  label={isCopied ? '✓ Copied' : 'Copy'}
+                  onPress={press => actions.onCopy(command, press.surface)}
+                />
+                {canShow && (
+                  <Button key={`showbutton${at}`} variant="secondary" label={isShown ? 'Hide' : 'Show'} onPress={() => actions.onShow(command)} />
+                )}
+                {name !== undefined ? (
+                  <Text size="footnote" weight="bold">
+                    {name}
+                  </Text>
+                ) : (
+                  <Text size="footnote" dimColor>
+                    {command.split('\n')[0]}
+                    {command.includes('\n') ? ' …' : ''}
+                  </Text>
+                )}
+              </Box>
+              {isShown && <Text size="body">{command}</Text>}
             </Box>
           )
         })}
+      {mode !== 'brief' &&
+        links.map((one, at) => (
+          <Box key={`link${at}`} flexDirection="row" alignItems="center" gap={1}>
+            <Button key={`linkbutton${at}`} variant="primary" label="Open" onPress={() => actions.onOpen(one.target)} />
+            <Text size="footnote" dimColor>
+              {one.name}
+            </Text>
+          </Box>
+        ))}
       {hasMore && (
-        <Text size="footnote" dimColor>
-          More in the full reply
-        </Text>
+        <Box flexDirection="row">
+          <Button
+            key="fullbutton"
+            variant="secondary"
+            label={current.isFullAnswer ? 'Hide full reply' : 'Full reply'}
+            onPress={() => actions.onFull()}
+          />
+        </Box>
       )}
+      {hasMore &&
+        current.isFullAnswer &&
+        paragraphs.map((paragraph, at) => (
+          <Text key={`full${at}`} size="body" dimColor>
+            {paragraph}
+          </Text>
+        ))}
       {you}
       {mode === 'pane' &&
         paragraphs.map((paragraph, at) => (
@@ -1792,6 +1900,10 @@ function cardActions($: EngineInterface): CardActions {
     onChoose: text => void choose($, text),
     onCopy: (text, surface) => void copyCommand($, text, surface),
     onOpen: target => void openTarget($, target),
+    onShow: text => {
+      cue($, 'tap', 0.8)
+      void update($, reply, now => (now === null ? now : { ...now, shownCopy: now.shownCopy === text ? undefined : text }))
+    },
     onRetry: () => void retry($),
   }
 }
@@ -1800,7 +1912,9 @@ function cardActions($: EngineInterface): CardActions {
 async function openTarget($: EngineInterface, target: string) {
   log($, `open: ${target}`)
   cue($, 'tap', 0.8)
-  await $.process.run(['open', target]).catch(error => log($, `open failed: ${reasonOf(error)}`))
+  const home = (await $.env.get('HOME')) ?? ''
+  const path = target.replace(/^~(?=\/)/, home)
+  await $.process.run(['open', path]).catch(error => log($, `open failed: ${reasonOf(error)}`))
 }
 
 // Retry: your last message, sent again.
@@ -2559,6 +2673,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     await resumeLogs($)
+    sessionCwd = typeof e.cwd === 'string' ? e.cwd : ''
     log($, 'loaded')
     if ((await read($, owner)) === '') await update($, owner, () => `chat-${Date.now()}-${Math.floor(Math.random() * 1e6)}`)
     const stored = (await $.store.get(STORE_KEY)) as Partial<Settings> | undefined
