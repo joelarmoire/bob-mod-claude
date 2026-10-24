@@ -111,6 +111,39 @@ Answer with those lines alone.`
 const NOTE_LINE = /^\s*\[bob-(tag|say|option(?:-\d+)?)\]:\s*#\s*"(.*)"\s*$/
 // One line, so the chat hides all of it (a third reference line showed up as text).
 const NOTE_ONE = /^\s*\[bob\]:\s*#\s*"(.*)"\s*$/
+// How Claude hands over its panel line: true, through the mod's own panel tool, so nothing shows in the chat; false,
+// as the hidden note at the end of the reply (which some chat views show as a line).
+const NOTE_BY_TOOL = true
+const PANEL_TOOL = 'mcp__bob-talks-back__panel'
+const PANEL_TOOL_SPEC = {
+  name: 'panel',
+  description:
+    "Hands the user's voice panel what to show and say for this reply. Call it once, as the very last thing in every reply to the user.",
+  inputSchema: {
+    type: 'object',
+    properties: {
+      tag: { type: 'string', description: 'Question:, Needs you:, Done: or Update:, then at most 10 words' },
+      say: { type: 'string', description: 'One or two short sentences, at most 30 words, with what matters most to the user right now' },
+      points: { type: 'array', items: { type: 'string' }, maxItems: 3, description: 'Each other new thing in the reply, in a few words' },
+      copy: { type: 'array', items: { type: 'string' }, description: 'A name for each code block the user should copy, in order' },
+      options: { type: 'array', items: { type: 'string' }, maxItems: 4, description: 'The choices, when you ask the user to pick between named options' },
+    },
+    required: ['tag', 'say'],
+  },
+  isDeferred: false,
+}
+const PANEL_TOOL_NOTE = [
+  `End every reply to the user by calling the ${PANEL_TOOL} tool once, as the very last thing (before mcp__ccd_turn__wrap_up when you use it), and write nothing after it.`,
+  'tag: Question: when you ask the user something, Needs you: only when the work is waiting on the user right now, Done: when the work is finished, Update: otherwise, then at most 10 words.',
+  'say: one or two short sentences, at most 30 words, with what matters most to the user right now; when the reply has something to copy, a file or link to open, or a step to do outside the chat, say so.',
+  'points: one short line for each other new thing in the reply (at most 3), so nothing in it is missing from the panel.',
+  'copy: put anything the user should copy (a tweet, a command, a prompt) in a code block, and name each one here, in order.',
+  'options: up to 4 short choices, only when you ask the user to pick between named options.',
+  'Link every file you made or point the user to with its path, so the panel can give it an Open button.',
+  'The user may only hear this, never read the reply: it must make sense on its own, so never use a word that only the reply explains (like "this link" or "that fix") without saying what it is. Plain words, first person, nothing that is not in the reply.',
+].join('\n')
+// The panel line the tool handed over for the reply being written.
+let toolNote: { gist: string; say: string; points: string[]; options: string[]; copy: string[] } | undefined
 const SPOKEN_NOTE = [
   "End every reply with a hidden note for the user's voice panel: a blank line, then exactly these two lines, as the very last thing.",
   '[bob-tag]: # "Done: what got done, in at most 10 words"',
@@ -1262,8 +1295,10 @@ function noteOf(answer: string) {
 }
 
 async function finishReply($: EngineInterface, id: number, answer: string, isAborted: boolean) {
-  const note = isAborted ? undefined : noteOf(answer)
-  if (note) log($, 'gist from Claude\'s own note')
+  const handed = toolNote
+  toolNote = undefined
+  const note = isAborted ? undefined : (handed ?? noteOf(answer))
+  if (note) log($, handed ? 'gist from the panel tool' : 'gist from Claude\'s own note')
   const quick = note ?? (isAborted ? undefined : shortSummary(answer))
   const said = await read($, reply).then(now => {
     if (now === null) return ''
@@ -1344,6 +1379,7 @@ async function finishReply($: EngineInterface, id: number, answer: string, isAbo
       say: summary?.say ?? '',
       choice,
       points: summary?.points ?? [],
+      copyNames: handed?.copy,
       pointAt: 0,
       isWorking: false,
       line: Math.min(now.line, keep),
@@ -1737,7 +1773,7 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
   const choice = current.choice ?? null
   const whole = current.blocks.map(one => one.text).join('\n\n')
   const commands = commandsOf(whole)
-  const copyNames = copyNamesOf(whole)
+  const copyNames = current.copyNames ?? copyNamesOf(whole)
   const openedTargets = new Set((current.opened ?? []).map(one => one.target))
   const links = linksOf(whole).filter(one => !openedTargets.has(one.target))
   const { tag, isAsk, text } = choice !== null ? tagOf(`Question: ${choice.ask}`) : tagOf(current.gist)
@@ -2337,6 +2373,7 @@ async function sendAnswer($: EngineInterface, text: string) {
 
 async function startReply($: EngineInterface, prompt: string): Promise<number> {
   hush($)
+  toolNote = undefined
   const fresh = await update($, reply, one => newReply((one?.id ?? 0) + 1, prompt))
   startTicking($)
   cue($, 'think', 0.3)
@@ -2673,6 +2710,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     await resumeLogs($)
+    await $.tool.register(PANEL_TOOL_SPEC).catch(error => log($, `panel tool not registered: ${reasonOf(error)}`))
     sessionCwd = typeof e.cwd === 'string' ? e.cwd : ''
     log($, 'loaded')
     if ((await read($, owner)) === '') await update($, owner, () => `chat-${Date.now()}-${Math.floor(Math.random() * 1e6)}`)
@@ -2830,6 +2868,19 @@ export const register: Register = (on, options) => {
     if (!isNow) await startReply($, text)
     return result
   }).catch(($, e, next) => next(e))
+
+  // The panel tool asks nobody: it only hands the panel its line.
+  on('tool.check', { tool: PANEL_TOOL }, () => ({ decision: 'allow' as const }))
+  on('tool.call', { tool: PANEL_TOOL }, async ($, e) => {
+    const input = e as unknown as Record<string, unknown>
+    const list = (value: unknown) => (Array.isArray(value) ? value.filter((one): one is string => typeof one === 'string') : [])
+    const tag = typeof input.tag === 'string' ? input.tag : ''
+    const say = typeof input.say === 'string' ? input.say : ''
+    const parsed = parseGist([tag, `Say: ${say}`, ...list(input.points).map(one => `- ${one}`), ...list(input.options).map(one => `> ${one}`)].join('\n'))
+    toolNote = parsed === undefined ? undefined : { ...parsed, copy: list(input.copy) }
+    log($, `panel tool: ${tag}`)
+    return { result: 'Shown in the voice panel.' }
+  })
 
   on('session.append', async ($, e, next) => {
     const stored = await next(e)
@@ -3037,7 +3088,7 @@ export const register: Register = (on, options) => {
     const composed = await next(e)
     const { isOn } = await read($, settings)
     if (!isOn) return composed
-    const spoken = { id: 'bob-talks-back:spoken-line', text: SPOKEN_NOTE, scope: 'session' as const }
+    const spoken = { id: 'bob-talks-back:spoken-line', text: NOTE_BY_TOOL ? PANEL_TOOL_NOTE : SPOKEN_NOTE, scope: 'session' as const }
     if (!e.tools.includes('mcp__ccd_turn__wrap_up')) return { sections: [...composed.sections, spoken] }
     return {
       sections: [

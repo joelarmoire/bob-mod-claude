@@ -70,6 +70,8 @@ export type Reply = {
   copied?: string
   // The text to copy whose Show was pressed: it stays open in the panel until hidden.
   shownCopy?: string
+  // The copy-card names the panel tool handed over, when it did.
+  copyNames?: string[]
 }
 
 export type Settings = {

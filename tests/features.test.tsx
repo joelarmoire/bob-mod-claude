@@ -1209,7 +1209,7 @@ test('56. the instructions ask Claude for the note, in the desktop app and in a 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   for (const tools of [['mcp__ccd_turn__wrap_up'], []]) {
     const out = (await $.prompt.compose({ model: 'test', promptModel: 'test', surfaces: ['desktop'], tools, outputStyle: null, traits: [], sections: [] } as never)) as { sections: { id: string; text: string }[] }
-    expect(out.sections.find(one => one.id.endsWith(':spoken-line'))?.text).toContain('[bob-say]: #')
+    expect(out.sections.find(one => one.id.endsWith(':spoken-line'))?.text).toContain('mcp__bob-talks-back__panel')
   }
 })
 
@@ -1428,4 +1428,31 @@ test('68. when the reply ends mid-sentence, the sentence being read finishes in 
   expect(said.filter(one => one.includes('and all 68 tests pass.'))).toHaveLength(1)
   expect(said.some(one => one.includes('Done in your copy, and all 68 tests pass.'))).toBe(true)
   expect(said.some(one => one.includes('Everything passes and nothing else changed.'))).toBe(true)
+})
+
+test('69. the panel tool: Claude hands the line over through a tool, so nothing shows in the chat, and nobody is asked', async ($, on) => {
+  const { clock, summaries } = boot(on, { voice: false })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'write the tweet' })
+  await $.session.append(says(long('Here it is:\n\n```text\nClaude talks back now.\n```')))
+  const check = await $.tool.check({ tool: 'mcp__bob-talks-back__panel', input: {} } as never)
+  expect((check as { decision: string }).decision).toBe('allow')
+  await $.tool.call({
+    tool: 'mcp__bob-talks-back__panel',
+    tag: 'Question: Post it tonight?',
+    say: 'The tweet is ready to copy in the panel.',
+    points: ['A testing plan before we publish'],
+    copy: ['Tweet reply'],
+    options: ['Tonight', 'Tomorrow'],
+  } as never)
+  await $.turn.complete({ answer: '', durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+
+  expect(summaries).toHaveLength(0)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  for (const text of ['Post it tonight?', 'The tweet is ready to copy in the panel.', '• A testing plan before we publish', 'Tweet reply']) {
+    expect((await band.find({ type: 'Text', text }))?.text).toBe(text)
+  }
+  expect((await band.findAll({ type: 'Button' })).map(one => String(one.props.label).trim())).toEqual(expect.arrayContaining(['Tonight', 'Tomorrow']))
+  await band.unmount()
 })
