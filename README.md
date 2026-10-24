@@ -36,7 +36,8 @@ https://github.com/user-attachments/assets/7d6c1697-c564-4a9c-ba90-70a0a1e5eb8b
 
 ## What it does
 
-- **Speaks the point, not the wall of text.** Each reply becomes one or two short spoken lines; short replies are said word for word.
+- **Speaks the point, not the wall of text.** Claude writes its own one or two spoken lines for each reply, in a note the chat doesn't show, so the line comes from the Claude that knows your conversation. Short replies are said word for word.
+- **Knows when there's more:** a long reply's card says "More in the full reply", so you know when the chat is worth a look. A long opening is cut to its first part as it arrives.
 - **Three voices:** the Mac's own voice, free and on by default, or OpenAI's normal or live voice with your key (`/bob mac`, `/bob normal`, `/bob live`).
 - **Captions, one phrase at a time,** with the word being spoken highlighted.
 - **Clear states:** working, QUESTION FOR YOU, NEEDS YOU and DONE, each with its own tag and sound.
@@ -85,11 +86,12 @@ The key is read from that file only and is never printed. The live voice also ne
 ## How it works
 
 1. **It listens to the chat.** As Claude writes, each message comes in (`session.append`) and is split into caption lines. Tool calls (`tool.call`) tell it what Claude is doing, and the task list follows Claude's plan updates.
-2. **It finds the gist.** When a turn ends (`turn.complete`), a small, fast model (Claude Haiku) sums the reply up in a line or two and pulls out any question and its options.
+2. **Claude writes the gist.** A short instruction added to Claude's prompt (`prompt.compose`) asks it to end each reply with a hidden note: a tag (Done, Update, Needs you or Question), the line to say out loud, and any options to pick from. The note is written as markdown reference lines (`[bob-say]: # "..."`), which the chat doesn't show. When the turn ends (`turn.complete`), the mod reads that note. If a reply has none, a small, fast model (Claude Haiku) writes the line instead, and if that doesn't come within 15 seconds, the end of the reply is said.
 3. **It speaks.** By default the Mac's own voice reads each line. With `/bob live`, each line goes to OpenAI's live voice, streamed so it starts at once, and the voice reports when each word is spoken so the captions highlight in sync. With `/bob normal`, OpenAI's text-to-speech reads it, and the highlight follows the voice's pauses.
 4. **It draws the panel** above the message box (`ui.render` for `AbovePrompt`): the orb, the captions, the status, and the card with the reply, the buttons and the time.
 5. **It answers for you.** Claude's questions, permission prompts and plan approvals are caught as they happen (`classic.PermissionRequest`), shown as buttons, and your click goes back to Claude exactly as the app's own dialog would send it.
 6. **It keeps itself visible.** The app's own "next step" box would cover the panel, so a short note in Claude's instructions (`prompt.compose`) asks it to put questions in plain words instead.
+7. **It keeps a history.** Everything said out loud and every question, with its date, goes to `/tmp/bob-talks-back-history.log`, which survives reloads, so you can check afterwards what the panel told you.
 
 ## The code
 
@@ -101,12 +103,12 @@ The key is read from that file only and is never printed. The live voice also ne
 | `helpers/realtime-voice.mjs` | Reads one line with OpenAI's live voice and writes a WAV, with the time of each word. Takes are cached in `~/.cache/bob-voice`. |
 | `helpers/realtime-stream.mjs` | The streamed version: the voice starts as soon as the first sound arrives. |
 | `sounds/*.wav` | The send, working, question and done sounds. |
-| `tests/*.test.tsx` | 52 tests covering every feature. Run them with `claude plugin test .` |
+| `tests/*.test.tsx` | 59 tests covering every feature. Run them with `claude plugin test .` |
 
 Inside `hooks/register.tsx`, the main pieces:
 
 - `addText` takes in each new message. `play` walks the caption lines one by one, and `streamLine` sends a line to the live voice and lights up each word as it is said.
-- `summarize` asks the small model for the gist and any question.
+- `noteOf` reads Claude's own hidden note; `summarize` asks the small model only when there is none, and `fallbackSummary` uses the end of the reply if that fails too.
 - `drawStage` draws the panel, `card` the finished reply, and `askButtons` the answer buttons.
 - `panelAskOf` turns a question, permission or plan into buttons. `answerAsk` and `decisionOf` send your answer back.
 - `engineOf` says which voice is picked (`/bob mac`, `normal` or `live`). `synthesize` (normal) and `synthesizeLive` (live) make the OpenAI voice, `say` the Mac's, and `findKey` finds your key.
@@ -115,8 +117,9 @@ Inside `hooks/register.tsx`, the main pieces:
 
 It's all plain code, so change whatever you like:
 
-- **What it says out loud:** the instructions for the spoken summary are `GIST_SYSTEM`, near the top of
-  `hooks/register.tsx`. Change the tone, the length or the language.
+- **What it says out loud:** the instruction that asks Claude for its spoken note is `SPOKEN_NOTE`, and the small
+  model's fallback instructions are `GIST_SYSTEM`, both near the top of `hooks/register.tsx`. Change the tone, the
+  length or the language.
 - **The voice:** `/bob mac`, `/bob normal` or `/bob live` for which voice speaks; `/bob voice <name>`, or the voice option in the plugin's settings, for which OpenAI voice; `/bob style` for the delivery.
 - **The sounds:** swap the files in `sounds/`.
 - **The panel:** its colors (`CLAUDE_ORANGE`) and the "working" words (`IDLE_WORDS`) are in `hooks/register.tsx`.

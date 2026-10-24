@@ -29,6 +29,8 @@ const LINK_WORDS = new Set(['and', 'but', 'or', 'so', 'that', 'which', 'while', 
 const MAX_PROMPT = 400
 // Under the message box your message gets about two lines; ⤢ shows it whole.
 const BAND_PROMPT = 120
+// Past this many words a reply holds more than its spoken summary: the card says so.
+const MORE_WORDS = 70
 // The system voice says about three words a second; a word's share of that
 // time grows with its length.
 const MS_PER_WEIGHT = 70
@@ -80,7 +82,9 @@ const RETRY_CHECK_MS = 8000
 const CLIP_PATHS = [`${CLIP_DIR}/line-a.wav`, `${CLIP_DIR}/line-b.wav`]
 const GIST_MODEL = 'claude-haiku-5-5'
 const GIST_SYSTEM = `You turn an AI coding assistant's reply into what its user hears.
-The user will NOT read the reply, so what you write must stand on its own.
+The user will NOT read the reply, so what you write must stand on its own:
+never use a word that only the reply explains ("this link", "that fix",
+"the file") without saying what it is.
 Line 1: a label, then at most 10 casual words:
 "Question: " and the question itself, when the reply asks the user something;
 "Needs you: " and what to do, only when the work is waiting on the user right
@@ -101,6 +105,20 @@ any other name for it.
 Keep who does what exactly as in the reply: "you" is the user, "I" is the
 assistant; never swap them.
 Answer with those lines alone.`
+// The spoken line comes from the Claude that wrote the reply, which knows the conversation: a note at the very end
+// of each reply, written as markdown reference lines, which the chat does not show. The summary model only steps in
+// without one.
+const NOTE_LINE = /^\s*\[bob-(tag|say|option(?:-\d+)?)\]:\s*#\s*"(.*)"\s*$/
+const SPOKEN_NOTE = [
+  "End every reply with a short hidden note for the user's voice panel: a blank line, then these lines, as the very last thing.",
+  '[bob-tag]: # "Done: what got done, in at most 10 words"',
+  '[bob-say]: # "One or two short sentences, at most 30 words, with what matters most to the user right now: the result, the decision or the next step"',
+  '[bob-option-1]: # "An option"',
+  'The tag starts with Question: when you ask the user something, Needs you: only when the work is waiting on the user right now, Done: when the work is finished, Update: otherwise.',
+  'Add [bob-option-1] to [bob-option-4] (each at most 4 words) only when you ask the user to pick between named options.',
+  'The user may only hear this note, never read the reply: it must make sense on its own, so never use a word that only the reply explains (like "this link" or "that fix") without saying what it is.',
+  'Write it as you would say it to a friend: plain words, first person, nothing that is not in the reply, no double quotes inside, and no numbers or file names unless they are the point.',
+].join('\n')
 const CLAUDE_ORANGE = '#D97757'
 // One accent only: the spoken word and a reply that needs you wear Claude's orange.
 const HIGHLIGHT = '#D97757'
@@ -226,6 +244,10 @@ let lastFailure: string | undefined
 let pendingAnswer: { text: string; id: number; at: number } | undefined
 let lastTurnStartAt = 0
 const logLines: string[] = []
+const historyLines: string[] = []
+const HISTORY_PATH = LOG_PATH.replace(/\.log$/, '-history.log')
+const HISTORY_KEEP = 2000
+const HISTORY_LINE = /^(loaded|say #|gist|turn complete|needs you|answered|panel answer|voice: no take|line #\d+ cut)/
 let lastDrawn = ''
 // Rows drawn while no reply was being captioned: history, never collapsed.
 const settled = new Set<string>()
@@ -235,6 +257,8 @@ const settled = new Set<string>()
 // Markdown to plain words: code and tables stay in the chat.
 function toPlain(markdown: string): string {
   return markdown
+    .replace(/<!--[\s\S]*?(-->|$)/g, '')
+    .replace(/^\s*\[[^\]]+\]:\s*\S+.*$/gm, '')
     .replace(/```[\s\S]*?```/g, '\n(copy it below)\n')
     .replace(/^\s*\|.*\|\s*$/gm, '')
     .replace(/`([^`]*)`/g, '$1')
@@ -256,7 +280,24 @@ function toLines(markdown: string, firstSentence: number): CaptionLine[] {
   const [first, second] = sentences
   if (first === undefined) return []
   const headline = first.split(/\s+/).length < 4 && second !== undefined ? `${first} ${second}` : first
-  return toCaptionLines(headline, firstSentence)
+  return toCaptionLines(openingPart(headline), firstSentence)
+}
+
+// A long opening is cut to its first part (its first phrases, up to OPENING_WORDS
+// words), so you get the gist as it arrives without a long, dense line.
+const LONG_OPENING_WORDS = 20
+const OPENING_WORDS = 15
+function openingPart(sentence: string): string {
+  const words = sentence.split(/\s+/)
+  if (words.length < LONG_OPENING_WORDS) return sentence
+  let part = ''
+  for (const phrase of sentence.split(/(?<=[,:;])\s+|\s+(?=[-–—]\s)/)) {
+    const next = part === '' ? phrase : `${part} ${phrase}`
+    if (next.split(/\s+/).length > OPENING_WORDS) break
+    part = next
+  }
+  if (part.split(/\s+/).length >= 5) return part.replace(/[,:;]$/, '.')
+  return `${words.slice(0, OPENING_WORDS).join(' ').replace(/[,:;]$/, '')}…`
 }
 
 // A sentence cut into caption lines at its natural breaks (commas, colons,
@@ -916,6 +957,20 @@ function log($: EngineInterface, line: string) {
   logLines.push(`${new Date().toISOString().slice(11, 23)} ${line}`)
   logLines.splice(0, Math.max(0, logLines.length - 300))
   void $.fs.write(LOG_PATH, `${logLines.join('\n')}\n`).catch(() => undefined)
+  // What was said and asked, with its date, in its own file that reloads and new chats keep adding to.
+  if (HISTORY_LINE.test(line)) {
+    historyLines.push(`${new Date().toISOString().slice(0, 19).replace('T', ' ')} ${line}`)
+    historyLines.splice(0, Math.max(0, historyLines.length - HISTORY_KEEP))
+    void $.fs.write(HISTORY_PATH, `${historyLines.join('\n')}\n`).catch(() => undefined)
+  }
+}
+
+// After a reload the module starts over: the log and the history pick up where the files left off.
+async function resumeLogs($: EngineInterface) {
+  if (logLines.length > 0) return
+  const [log, history] = await Promise.all([LOG_PATH, HISTORY_PATH].map(path => $.fs.read(path).catch(() => undefined)))
+  if (typeof log === 'string') logLines.push(...log.split('\n').filter(one => one !== '').slice(-250))
+  if (typeof history === 'string' && historyLines.length === 0) historyLines.push(...history.split('\n').filter(one => one !== '').slice(-HISTORY_KEEP))
 }
 
 const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
@@ -1077,7 +1132,12 @@ async function summarize(
     log($, `gist: no line (${result.reason})`)
     return undefined
   }
-  const lines = result.text
+  return parseGist(result.text)
+}
+
+// A summary's lines (the model's, or Claude's own note): the tagged line, the Say line, points and options.
+function parseGist(text: string): { gist: string; say: string; points: string[]; options: string[] } | undefined {
+  const lines = text
     .replace(/[*_`#]/g, '')
     .split('\n')
     .map(line => line.trim())
@@ -1131,8 +1191,20 @@ function fallbackSummary(answer: string) {
   return { gist: `Update: ${last}`, say: sentences.slice(-2).join(' '), points: [], options: [] }
 }
 
+// Claude's own note at the end of the reply, when it wrote one: its tag, Say and option lines.
+function noteOf(answer: string) {
+  const found = answer.split('\n').map(line => NOTE_LINE.exec(line)).filter(one => one !== null)
+  const tag = found.find(one => one[1] === 'tag')?.[2]
+  if (tag === undefined) return undefined
+  const say = found.find(one => one[1] === 'say')?.[2] ?? ''
+  const options = found.filter(one => one[1].startsWith('option')).map(one => `> ${one[2]}`)
+  return parseGist([tag, `Say: ${say}`, ...options].join('\n'))
+}
+
 async function finishReply($: EngineInterface, id: number, answer: string, isAborted: boolean) {
-  const quick = isAborted ? undefined : shortSummary(answer)
+  const note = isAborted ? undefined : noteOf(answer)
+  if (note) log($, 'gist from Claude\'s own note')
+  const quick = note ?? (isAborted ? undefined : shortSummary(answer))
   const said = await read($, reply).then(now => {
     if (now === null) return ''
     const lastStart = now.blocks.length > 1 ? (now.blocks.at(-2)?.end ?? 0) : 0
@@ -1605,6 +1677,8 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
   const commands = commandsOf(current.blocks.map(one => one.text).join('\n\n'))
   const { tag, isAsk, text } = choice !== null ? tagOf(`Question: ${choice.ask}`) : tagOf(current.gist)
   const limit = mode === 'pane' ? MAX_PROMPT : BAND_PROMPT
+  // A reply that says much more than its summary gets a hint, so you know when the chat is worth a look.
+  const hasMore = mode === 'band' && choice === null && answer.split(/\s+/).filter(one => one !== '').length > MORE_WORDS
   const prompt = current.prompt.length > limit ? `${current.prompt.slice(0, limit).trimEnd()}…` : current.prompt
   const you = prompt !== '' && mode !== 'brief' && (
     <Box flexDirection="row" gap={1}>
@@ -1692,6 +1766,11 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
             </Box>
           )
         })}
+      {hasMore && (
+        <Text size="footnote" dimColor>
+          More in the full reply
+        </Text>
+      )}
       {you}
       {mode === 'pane' &&
         paragraphs.map((paragraph, at) => (
@@ -2479,6 +2558,7 @@ export const register: Register = (on, options) => {
   voice = String(options.voice ?? 'ash')
 
   on('session.start', async ($, e, next) => {
+    await resumeLogs($)
     log($, 'loaded')
     if ((await read($, owner)) === '') await update($, owner, () => `chat-${Date.now()}-${Math.floor(Math.random() * 1e6)}`)
     const stored = (await $.store.get(STORE_KEY)) as Partial<Settings> | undefined
@@ -2841,10 +2921,13 @@ export const register: Register = (on, options) => {
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
     const { isOn } = await read($, settings)
-    if (!isOn || !e.tools.includes('mcp__ccd_turn__wrap_up')) return composed
+    if (!isOn) return composed
+    const spoken = { id: 'bob-talks-back:spoken-line', text: SPOKEN_NOTE, scope: 'session' as const }
+    if (!e.tools.includes('mcp__ccd_turn__wrap_up')) return { sections: [...composed.sections, spoken] }
     return {
       sections: [
         ...composed.sections,
+        spoken,
         {
           id: 'bob-talks-back:ask-in-words',
           text:

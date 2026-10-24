@@ -48,6 +48,8 @@ type Boot = {
   promptDelayMs?: number
   // The summary model gives no line (it timed out).
   gistFails?: boolean
+  // What the history file already holds from earlier chats.
+  history?: string
   // The voice picked with /bob mac, normal or live; most tests run on the live one, null leaves it unpicked.
   engine?: 'mac' | 'normal' | 'live' | null
 }
@@ -56,7 +58,7 @@ type Boot = {
 // plays, runs and fetches is recorded.
 function boot(
   on: On,
-  { voice, key = false, gist = 'Done: all set.', refuses, live = false, stuck = false, heard, streamError, lockedMs = 0, promptDelayMs = 0, gistFails = false, engine = 'live' }: Boot,
+  { voice, key = false, gist = 'Done: all set.', refuses, live = false, stuck = false, heard, streamError, lockedMs = 0, promptDelayMs = 0, gistFails = false, history = '', engine = 'live' }: Boot,
 ) {
   const clock = mock.clock(on)
   mock.store(on, { 'settings-v2': { isOn: true, isVoiceOn: voice, ...(engine === null ? {} : { voiceEngine: engine }) } })
@@ -77,7 +79,9 @@ function boot(
   on('fs.read', (_, e) =>
     key && String(e.path).endsWith('openai.env')
       ? { value: 'OPENAI_API_KEY=sk-test-0000000000000000000000' }
-      : { value: '' },
+      : String(e.path).endsWith('-history.log')
+        ? { value: history }
+        : { value: '' },
   )
   on('prompt.submit', async (_, e) => {
     if (promptDelayMs > 0) await clock.sleep(promptDelayMs)
@@ -158,14 +162,15 @@ function boot(
       },
     }
   })
-  on('model.complete', () => (gistFails ? { value: { isAnswered: false as const, reason: 'aborted' as const } } : {
+  const summaries: string[] = []
+  on('model.complete', (_, e) => (summaries.push(String(e.prompt)), gistFails ? { value: { isAnswered: false as const, reason: 'aborted' as const } } : {
     value: {
       isAnswered: true as const,
       text: gist,
       usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
     },
   }))
-  return { clock, sounds, runs, fetches, prompts, agents }
+  return { clock, sounds, runs, fetches, prompts, agents, written, summaries }
 }
 
 const says = (text: string) => ({
@@ -1098,4 +1103,109 @@ test('49. when the summary never comes, the end of the reply is said, not just i
 
   const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-1) ?? '')
   expect(said.some(one => one.includes('Reply under the stunt with the link before tonight.'))).toBe(true)
+})
+
+test('50. a long opening is cut to its first part as it arrives', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'build it' })
+  await $.session.append(
+    says(
+      "I'm building it in its original colors, 35 parts and about 9,800 triangles, and once the body is done the door minigun goes on.",
+    ),
+  )
+  await clock.advance(8000)
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-1) ?? '')
+  expect(said.some(one => one.includes("I'm building it in its original colors, 35 parts and about 9,800 triangles."))).toBe(true)
+  expect(said.some(one => one.includes('door minigun'))).toBe(false)
+})
+
+test('51. a long reply\'s card says there is more in the full reply; a short one does not', async ($, on) => {
+  const { clock } = boot(on, { voice: false, gist: 'Update: The plan is set.' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'what is the plan' })
+  const reply = Array.from({ length: 12 }, (_, at) => `Point ${at + 1} of the plan has a few words in it.`).join(' ')
+  await $.session.append(says(reply))
+  await $.turn.complete({ answer: reply, durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await band.find({ type: 'Text', text: 'More in the full reply' }))?.text).toBe('More in the full reply')
+  await band.unmount()
+
+  await $.prompt.submit({ text: 'and now' })
+  await $.session.append(says('All set, nothing else to do.'))
+  await $.turn.complete({ answer: 'All set, nothing else to do.', durationMs: 5, isAborted: false, turnId: 't2' })
+  await clock.advance(30_000)
+  const again = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await again.find({ type: 'Text', text: 'More in the full reply' })).toBeUndefined()
+  await again.unmount()
+})
+
+test('52. what was said goes to a history file that a reload keeps adding to', async ($, on) => {
+  const { clock, written } = boot(on, { voice: true, history: '2026-10-24 20:00:00 say #0 (system): an older line' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'hello' })
+  await $.session.append(says('Working on it.'))
+  await $.turn.complete({ answer: long('Working on it.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(20_000)
+  const file = [...written.entries()].find(([path]) => path.endsWith('-history.log'))?.[1] ?? ''
+  expect(file).toContain('an older line')
+  expect(file).toContain('say #')
+})
+
+const NOTE = '\n\n[bob-tag]: # "Done: The helicopter is yellow now"\n[bob-say]: # "It is painted Dot World yellow, ready to upload when you are."'
+
+test('53. Claude\'s own note gives the spoken line: no summary model, and the note is never read or shown', async ($, on) => {
+  const { clock, runs, summaries } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'paint it' })
+  const reply = long('Painted the three body panels in the game color and kept the trim, glass and lights as they were.') + NOTE
+  await $.session.append(says(reply))
+  await clock.advance(6000)
+  await $.turn.complete({ answer: reply, durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+
+  expect(summaries).toHaveLength(0)
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-1) ?? '')
+  expect(said.some(one => one.includes('It is painted Dot World yellow, ready to upload when you are.'))).toBe(true)
+  expect(said.some(one => one.includes('bob-say') || one.includes('Say:'))).toBe(false)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await band.find({ type: 'Text', text: 'The helicopter is yellow now' }))?.text).toBe('The helicopter is yellow now')
+  expect(await band.find({ type: 'Text', text: /bob-say|Say:/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('54. a question in Claude\'s note becomes buttons', async ($, on) => {
+  const { clock } = boot(on, { voice: false })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'colors?' })
+  const reply = long('The helicopter is built and the minigun is on.') + '\n\n[bob-tag]: # "Question: Which color?"\n[bob-say]: # "The build is done."\n[bob-option-1]: # "Dot World yellow"\n[bob-option-2]: # "Original"'
+  await $.session.append(says(reply))
+  await $.turn.complete({ answer: reply, durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await band.findAll({ type: 'Button' })).map(one => String(one.props.label).trim())).toEqual(
+    expect.arrayContaining(['Dot World yellow', 'Original']),
+  )
+  await band.unmount()
+})
+
+test('55. without a note the summary model still writes the line', async ($, on) => {
+  const { clock, summaries } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'hello' })
+  await $.session.append(says('Working on it.'))
+  await $.turn.complete({ answer: long('Working on it.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(20_000)
+  expect(summaries).toHaveLength(1)
+})
+
+test('56. the instructions ask Claude for the note, in the desktop app and in a terminal', async ($, on) => {
+  boot(on, { voice: true })
+  on('prompt.compose', () => ({ sections: [] }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  for (const tools of [['mcp__ccd_turn__wrap_up'], []]) {
+    const out = (await $.prompt.compose({ model: 'test', promptModel: 'test', surfaces: ['desktop'], tools, outputStyle: null, traits: [], sections: [] } as never)) as { sections: { id: string; text: string }[] }
+    expect(out.sections.find(one => one.id.endsWith(':spoken-line'))?.text).toContain('[bob-say]')
+  }
 })
