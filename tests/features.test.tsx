@@ -1065,3 +1065,19 @@ test('47. /bob normal speaks with OpenAI text-to-speech, /bob live with the live
   expect(JSON.stringify(await $.command.run({ command: 'bob', args: 'mac' }))).toContain("the Mac's own voice (free)")
   expect(JSON.stringify(await $.command.run({ command: 'bob', args: '' }))).toContain("the Mac's own voice (free)")
 })
+
+test('48. a short reply never says its first sentence twice', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'which format for X?' })
+  const reply = 'No, put the normal one on X. The vertical ones are for TikTok and Shorts.'
+  await $.session.append(says(reply))
+  // The headline is read out as the reply arrives, before the turn ends.
+  await clock.advance(6000)
+  await $.turn.complete({ answer: reply, durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-1) ?? '')
+  expect(said.filter(one => one.includes('No, put the normal one on X.'))).toHaveLength(1)
+  expect(said.some(one => one.includes('The vertical ones are for TikTok and Shorts.'))).toBe(true)
+})

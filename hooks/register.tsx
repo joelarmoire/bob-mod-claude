@@ -1027,6 +1027,23 @@ function closingSentences(gist: string, choice: Choice | null, say: string, note
 
 const needsYou = (text: string) => text.startsWith(QUESTION_INTRO) || text.startsWith(ATTENTION_INTRO)
 
+// What is left of the closing lines once the sentences already said as the
+// reply arrived are taken out: a short reply is said word for word, and its
+// first sentence was usually just read out as the headline. A line that needs
+// you is kept whole unless all of it was said.
+const plainWords = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+function unsaid(texts: string[], said: string): string[] {
+  const heard = ` ${plainWords(said)} `
+  const isHeard = (text: string) => plainWords(text) !== '' && heard.includes(` ${plainWords(text)} `)
+  return texts
+    .map(text =>
+      needsYou(text)
+        ? isHeard(text) ? '' : text
+        : text.split(/(?<=[.!?])\s+/).filter(one => !isHeard(one)).join(' ').trim(),
+    )
+    .filter(text => text !== '')
+}
+
 // Text up to its last finished sentence: a summary cut short mid-sentence is
 // spoken only as far as it makes sense.
 function wholeSentences(text: string): string {
@@ -1129,7 +1146,7 @@ async function finishReply($: EngineInterface, id: number, answer: string, isAbo
     const { isVoiceOn } = await read($, settings)
     if (isVoiceOn) {
       const before = await read($, reply)
-      for (const sentence of closingSentences(gist, before?.choice ?? asked, summary?.say ?? '', notes)) {
+      for (const sentence of unsaid(closingSentences(gist, before?.choice ?? asked, summary?.say ?? '', notes), said)) {
         void voiceFor($, sentence.split(/\s+/).join(' '))
       }
     }
@@ -1166,8 +1183,7 @@ async function finishReply($: EngineInterface, id: number, answer: string, isAbo
       .flatMap(one => one.words)
       .join(' ')
       .toLowerCase()
-    const closing = closingSentences(gist, choice, summary?.say ?? '', notes)
-      .filter(text => !said.includes(text.toLowerCase()))
+    const closing = unsaid(closingSentences(gist, choice, summary?.say ?? '', notes), said)
       .flatMap((text, at) => toCaptionLines(text, first + at, true))
     const lines = [...now.lines.slice(0, keep), ...closing]
     const blocks = now.blocks.map((block, at) =>

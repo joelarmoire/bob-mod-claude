@@ -101,7 +101,7 @@ The key is read from that file only and is never printed. The live voice also ne
 | `helpers/realtime-voice.mjs` | Reads one line with OpenAI's live voice and writes a WAV, with the time of each word. Takes are cached in `~/.cache/bob-voice`. |
 | `helpers/realtime-stream.mjs` | The streamed version: the voice starts as soon as the first sound arrives. |
 | `sounds/*.wav` | The send, working, question and done sounds. |
-| `tests/*.test.tsx` | 50 tests covering every feature. Run them with `claude plugin test .` |
+| `tests/*.test.tsx` | 51 tests covering every feature. Run them with `claude plugin test .` |
 
 Inside `hooks/register.tsx`, the main pieces:
 
