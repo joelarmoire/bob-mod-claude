@@ -83,7 +83,8 @@ const GIST_SYSTEM = `You turn an AI coding assistant's reply into what its user 
 The user will NOT read the reply, so what you write must stand on its own.
 Line 1: a label, then at most 10 casual words:
 "Question: " and the question itself, when the reply asks the user something;
-"Needs you: " and what to do, when the user has to act;
+"Needs you: " and what to do, only when the work is waiting on the user right
+now; things the user will do later are "Update: ";
 "Done: " and what got done, when the work is finished;
 "Update: " and the news, otherwise.
 Line 2: "Say: " then one or two short sentences, at most 30 words, with what
