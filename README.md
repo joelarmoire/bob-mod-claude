@@ -4,6 +4,12 @@
 
 > **Beta.** bob-mod-claude reads you the gist of each reply and puts questions and approvals in a panel, so you don't have to read everything. It can leave out details. For anything important, like code changes, warnings or costs, glance at the full reply in the chat.
 
+## See it
+
+[![Watch the demo: Claude builds a helicopter in Blender while the mod talks back](media/demo-poster.jpg)](media/demo.mp4)
+
+Claude finishes a 3D helicopter in Blender, paints it, uploads it to a game and plans a police chase. The mod says each step in a few words, and questions and approvals are answered from the panel. (2:29, sound on.)
+
 ## What it does
 
 - **Speaks the point, not the wall of text.** Each reply becomes one or two short spoken lines; short replies are said word for word.
