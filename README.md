@@ -51,6 +51,16 @@ https://github.com/user-attachments/assets/7d6c1697-c564-4a9c-ba90-70a0a1e5eb8b
 - **Two chats at once:** one talks while the other waits its turn.
 - **Stays out of the way:** sessions nobody watches (`claude -p`, scripts) get no voice, sound or panel.
 
+## What it costs
+
+Honest numbers, so nothing surprises you:
+
+- **Time:** each reply ends with one extra short step: Claude hands the panel its line, then writes its message. That adds about 1–3 seconds per reply.
+- **Usage:** the panel's instructions and its tool add about 750 tokens to each request (the same every time, so after the first they are mostly read from the prompt cache, at the cheaper rate), and each reply's panel line is about 100 tokens. If Claude ever skips the panel, a small model (Claude Haiku) writes the line instead.
+- **How Claude asks:** questions come in plain words, with buttons in the panel, instead of in the app's own question box. The spoken summary can leave out details; the full reply is always in the chat.
+- **Off means off:** ✕ on the panel or `/bob off` drops the instructions and the extra step (only the tool's short definition stays listed). Sessions nobody watches (`claude -p`, scripts) are never touched.
+- **Your data:** the Mac's voice and Whisper run on your Mac. OpenAI is only used if you add your own key.
+
 ## Install
 
 **Easiest:** send Claude the prompt at the top of this page.
