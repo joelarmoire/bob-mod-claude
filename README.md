@@ -2,13 +2,13 @@
 
 **Claude talks back.** A mod for the Claude desktop app (Code tab). It says each reply out loud in a few words and shows it as big captions, with the spoken word highlighted. You glance, you hear the gist, you keep working. The full reply is still in the chat when you want it.
 
-**Install in one step:** copy this, send it to Claude (the desktop app's Code tab, or Claude Code in a terminal), and allow the command when it asks.
+**Install in one step:** copy this, send it to Claude (the desktop app's Code tab, or Claude Code in a terminal), and allow the command when it asks. (In auto mode, Claude's safety check may ask you to run the command yourself: it shows it, and you type it after `!`.)
 
 ```text
 Install the Claude mod bob-talks-back for me. Run:
 
 "${CLAUDE_CODE_EXECPATH:-claude}" plugin install bob-talks-back \
-  --marketplace joelarmoire/bob-mod-claude
+  --marketplace joelarmoire/bob-mod-claude --config voice=ash
 
 Then tell me to type /reload-plugins (or open a new chat): from my
 next message Claude talks back, with the Mac's free voice.
