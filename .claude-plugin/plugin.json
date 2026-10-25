@@ -1,6 +1,6 @@
 {
   "name": "bob-talks-back",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Claude talks back: says each reply's gist out loud with TikTok-style captions, and puts questions and approvals in a panel (beta)",
   "license": "MIT",
   "types": "./types/index.d.ts",

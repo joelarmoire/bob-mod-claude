@@ -2117,7 +2117,26 @@ test('105. many things to copy and open: those that fit show under the orb, the 
   await band.unmount()
 })
 
-test('106. out of the box the free Mac voice speaks, even with an OpenAI key', async ($, on) => {
+test('106. a spoken line that asks, then gives the answers ("…too? Yes or no.") is not asked again, and "ready to copy" is said once', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'list my files' })
+  const reply = long('This command lists your files:\n\n```bash\nls -l\n```\n\nDo you want hidden files too?')
+  await $.session.append(says(reply))
+  await $.tool.call({
+    tool: 'mcp__bob-talks-back__panel',
+    tag: 'Question: Do you want hidden files listed too?',
+    say: 'The command is ls -l, ready to copy. Do you want hidden files included too? Yes or no.',
+    options: ['Yes', 'No'],
+  } as never)
+  await $.turn.complete({ answer: reply, durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(60_000)
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-2) ?? '')
+  expect(said.some(one => one.includes('Question for you'))).toBe(false)
+  expect(said.filter(one => /ready to copy/i.test(one))).toHaveLength(1)
+})
+
+test('107. out of the box the free Mac voice speaks, even with an OpenAI key', async ($, on) => {
   const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'hello' })
@@ -2130,7 +2149,7 @@ test('106. out of the box the free Mac voice speaks, even with an OpenAI key', a
   expect(runs.some(argv => argv[0] === 'say')).toBe(true)
 })
 
-test('107. /bob normal speaks with OpenAI text-to-speech, /bob live with the live voice, /bob mac back to free', async ($, on) => {
+test('108. /bob normal speaks with OpenAI text-to-speech, /bob live with the live voice, /bob mac back to free', async ($, on) => {
   const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 

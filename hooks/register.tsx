@@ -1308,8 +1308,12 @@ function closingLine(gist: string, choice: Choice | null) {
 // How Bob closes a reply, sentence by sentence: what the reply says, then the
 // question or request, which gets the ding. For plain news the explanation is
 // enough on its own.
-function closingSentences(gist: string, choice: Choice | null, say: string, notes: string[] = []): string[] {
+function closingSentences(gist: string, choice: Choice | null, say: string, allNotes: string[] = []): string[] {
   const last = closingLine(gist, choice)
+  // A note the spoken line already covers ("…ready to copy." twice) is left out.
+  const notes = allNotes.filter(
+    note => !(/\bcopy\b/i.test(say) && /\bcopy\b/i.test(note)) && !(/\bopen(ed)?\b/i.test(say) && /\bopened\b/i.test(note)),
+  )
   // A one-line question ("Hi, how can I help you today?") is said as written:
   // "Question for you." only leads a question that follows an explanation.
   if (say === '' && choice === null && tagOf(gist).tag === 'QUESTION FOR YOU') return [...notes, tagOf(gist).text]
@@ -1321,11 +1325,17 @@ function closingSentences(gist: string, choice: Choice | null, say: string, note
   return needsYou(last) ? [say, ...notes, last] : [say, ...notes]
 }
 
-// A line's last sentence when it is a question, and what comes before it.
+// A line's closing question and what comes before it: its last sentence when that is a question, or a question
+// followed by a few words that only answer it ("Do you want them too? Yes or no.").
 function endingQuestion(text: string): { before: string; question: string } | undefined {
   const sentences = text.trim().split(/(?<=[.!?])\s+/)
-  const question = sentences.pop() ?? ''
-  return /\?["')\]]*$/.test(question) ? { before: sentences.join(' '), question } : undefined
+  const isQuestion = (one: string | undefined) => one !== undefined && /\?["')\]]*$/.test(one)
+  const last = sentences.at(-1)
+  if (isQuestion(last)) return { before: sentences.slice(0, -1).join(' '), question: last ?? '' }
+  if (sentences.length >= 2 && (last ?? '').split(/\s+/).length <= 5 && isQuestion(sentences.at(-2))) {
+    return { before: sentences.slice(0, -2).join(' '), question: sentences.slice(-2).join(' ') }
+  }
+  return undefined
 }
 
 const needsYou = (text: string) => text.startsWith(QUESTION_INTRO) || text.startsWith(ATTENTION_INTRO)
