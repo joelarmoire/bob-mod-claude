@@ -60,13 +60,15 @@ type Boot = {
   engine?: 'mac' | 'normal' | 'live' | null
   // whisper.cpp and its English model are on this Mac.
   whisper?: boolean
+  // The surfaces the session draws on, asked at each call: the desktop app's by default; none in a -p run.
+  surfaces?: () => string[]
 }
 
 // A session with Bob loaded and everything beneath him stood in for: what he
 // plays, runs and fetches is recorded.
 function boot(
   on: On,
-  { voice, key = false, gist = 'Done: all set.', refuses, live = false, stuck = false, heard, streamError, lockedMs = 0, promptDelayMs = 0, gistFails = false, history = '', sayMs = 0, sayWrap = Infinity, heardYou = 'Make the button purple.', micLevel = -18, engine = 'live', whisper = false }: Boot,
+  { voice, key = false, gist = 'Done: all set.', refuses, live = false, stuck = false, heard, streamError, lockedMs = 0, promptDelayMs = 0, gistFails = false, history = '', sayMs = 0, sayWrap = Infinity, heardYou = 'Make the button purple.', micLevel = -18, engine = 'live', whisper = false, surfaces = () => ['desktop'] }: Boot,
 ) {
   const clock = mock.clock(on)
   mock.store(on, { 'settings-v2': { isOn: true, isVoiceOn: voice, ...(engine === null ? {} : { voiceEngine: engine }) } })
@@ -78,6 +80,7 @@ function boot(
   const written = new Map<string, string>()
   const agents: { id: string; description: string; type: string; status: string }[] = []
   on('agent.list', () => ({ value: agents as never }))
+  on('session.surfaces', () => ({ value: surfaces() as never }))
   // The Mac's mics as ffmpeg lists them: a loopback, an app mic, then earbuds.
   const MICS = '[AVFoundation indev @ 0x1] AVFoundation audio devices:\n[AVFoundation indev @ 0x1] [0] Camo Microphone\n[AVFoundation indev @ 0x1] [1] Baseus Bass BP1 Pro\n[AVFoundation indev @ 0x1] [2] BlackHole 16ch\n'
   // ffmpeg records until the mod sends it pkill -INT.
@@ -1921,9 +1924,10 @@ test('94. an opening the summary replaces during its start tone is never said, s
 })
 
 test('97. a session nobody watches (claude -p, a script) gets no voice, no sound and no panel instructions', async ($, on) => {
-  const { clock, runs, sounds } = boot(on, { voice: true })
+  // A -p run: not interactive, and no surface ever attaches.
+  const { clock, runs, sounds } = boot(on, { voice: true, surfaces: () => [] })
   on('prompt.compose', () => ({ sections: [] }))
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: false })
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
   const composed = (await $.prompt.compose({ model: 'test', promptModel: 'test', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)) as { sections: { id: string }[] }
   expect(composed.sections.some(one => one.id.includes(':spoken-line') || one.id.includes(':ask-in-words'))).toBe(false)
   await $.prompt.submit({ text: 'run the build' })
@@ -1934,7 +1938,19 @@ test('97. a session nobody watches (claude -p, a script) gets no voice, no sound
   expect(sounds).toHaveLength(0)
 })
 
-test('98. out of the box the free Mac voice speaks, even with an OpenAI key', async ($, on) => {
+test('98. the desktop app starts its sessions not interactive and without a surface, then attaches one: Bob talks there', async ($, on) => {
+  let attached: string[] = []
+  const { clock, runs } = boot(on, { voice: true, surfaces: () => attached })
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  attached = ['desktop']
+  await $.prompt.submit({ text: 'hello' })
+  await $.session.append(says('Hello there.'))
+  await $.turn.complete({ answer: long('Hello there.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+  expect(runs.some(argv => argv[0] === 'say')).toBe(true)
+})
+
+test('100. out of the box the free Mac voice speaks, even with an OpenAI key', async ($, on) => {
   const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'hello' })
@@ -1947,7 +1963,7 @@ test('98. out of the box the free Mac voice speaks, even with an OpenAI key', as
   expect(runs.some(argv => argv[0] === 'say')).toBe(true)
 })
 
-test('99. /bob normal speaks with OpenAI text-to-speech, /bob live with the live voice, /bob mac back to free', async ($, on) => {
+test('101. /bob normal speaks with OpenAI text-to-speech, /bob live with the live voice, /bob mac back to free', async ($, on) => {
   const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 

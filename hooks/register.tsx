@@ -288,8 +288,14 @@ let liveTurn = 0
 let isSpeaking = false
 // The orb's mic is open: no sound of Bob's plays into it.
 let isListening = false
-// A session nobody watches (claude -p, a script, an SDK host): Bob stays out of it, with no voice, sound or panel.
-let isHeadless = false
+// A session nobody watches (claude -p, a script): it draws on no surface, so Bob stays out of it, with no voice, sound
+// or panel. The desktop app starts its sessions the same way (not interactive, no surface yet) and attaches its surface
+// a moment later, so this is asked at each event until a surface shows up.
+let isWatched = false
+async function isUnwatched($: EngineInterface): Promise<boolean> {
+  if (!isWatched) isWatched = (await $.session.surfaces()).length > 0
+  return !isWatched
+}
 let lastSpokeAt = 0
 // The sentence Bob has taken up (fetching its voice or saying it): the summary
 // queues behind it instead of replacing it.
@@ -3270,8 +3276,6 @@ export const register: Register = (on, options) => {
   voice = String(options.voice ?? 'ash')
 
   on('session.start', async ($, e, next) => {
-    isHeadless = e.isInteractive === false
-    if (isHeadless) return next(e)
     await resumeLogs($)
     await registerPanelTool($)
     sessionCwd = typeof e.cwd === 'string' ? e.cwd : ''
@@ -3390,7 +3394,7 @@ export const register: Register = (on, options) => {
 
   // A new prompt starts a new reply; whatever was still being said stops.
   on('prompt.submit', async ($, e, next) => {
-    if (isHeadless) return next(e)
+    if (await isUnwatched($)) return next(e)
     // A fresh start refused the panel tool before the chat was bound: by the first message it is.
     if (!isPanelToolRegistered) void registerPanelTool($)
     if (e.isMeta || e.command) return next(e)
@@ -3451,7 +3455,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.append', async ($, e, next) => {
-    if (isHeadless) return next(e)
+    if (await isUnwatched($)) return next(e)
     const stored = await next(e)
     if (e.door !== 'response' || e.agentId !== undefined) return stored
     await stillWorking($)
@@ -3466,7 +3470,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
-    if (isHeadless) return next(e)
+    if (await isUnwatched($)) return next(e)
     if (e.agentId !== undefined) return next(e)
     const tool = String(e.tool)
     const input = e as unknown as Record<string, unknown>
@@ -3568,7 +3572,7 @@ export const register: Register = (on, options) => {
   // answer it from the panel; with no answer in ten minutes, the app's own
   // dialog is left to answer.
   on('classic.PermissionRequest', async ($, e, next) => {
-    if (isHeadless) return next(e)
+    if (await isUnwatched($)) return next(e)
     const beneath = await next(e)
     if (e.agent_id !== undefined || beneath.decision !== undefined) return beneath
     const input = (e.tool_input ?? {}) as Record<string, unknown>
@@ -3610,7 +3614,7 @@ export const register: Register = (on, options) => {
 
   // Why a turn died, as the app reports it, for the red line under the reply.
   on('classic.StopFailure', async ($, e, next) => {
-    if (isHeadless) return next(e)
+    if (await isUnwatched($)) return next(e)
     const result = await next(e)
     if (e.agent_id === undefined) lastFailure = failureOf(e.error, e.error_details)
     return result
@@ -3619,7 +3623,7 @@ export const register: Register = (on, options) => {
   // A turn that starts without a new prompt of yours (a hook sent Claude back
   // to work) carries on the same reply.
   on('turn.start', async ($, e, next) => {
-    if (isHeadless) return next(e)
+    if (await isUnwatched($)) return next(e)
     const result = await next(e)
     if (e.agentId === undefined) lastTurnStartAt = await $.clock.now()
     if (e.agentId === undefined) await stillWorking($)
@@ -3627,7 +3631,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (isHeadless) return next(e)
+    if (await isUnwatched($)) return next(e)
     const result = await next(e)
     // A helper's end ticks it off in the panel.
     if (e.agentId !== undefined) {
@@ -3659,7 +3663,7 @@ export const register: Register = (on, options) => {
   // place, and Bob vanishes for the rest of the turn while he goes on talking. So Claude asks in words, and Bob's
   // panel does the asking with its own buttons.
   on('prompt.compose', async ($, e, next) => {
-    if (isHeadless) return next(e)
+    if (await isUnwatched($)) return next(e)
     const composed = await next(e)
     const { isOn } = await read($, settings)
     if (!isOn) return composed

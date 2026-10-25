@@ -34,6 +34,7 @@ const PANE = {
 test('Bob shows the prompt, then his one-line gist and the full answer', async ($, on) => {
   const clock = mock.clock(on)
   mock.store(on, { 'settings-v2': { isOn: true, isVoiceOn: false } })
+  on('session.surfaces', () => ({ value: ['desktop'] as never }))
   on('command.register', () => ({ value: { command: 'bob' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('fs.write', () => ({ value: undefined }))
@@ -79,6 +80,7 @@ test('Bob shows the prompt, then his one-line gist and the full answer', async (
 test('while Claude waits on a question, the panel shows it', async ($, on) => {
   mock.clock(on)
   mock.store(on, { 'settings-v2': { isOn: true, isVoiceOn: false } })
+  on('session.surfaces', () => ({ value: ['desktop'] as never }))
   on('command.register', () => ({ value: { command: 'bob' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('fs.write', () => ({ value: undefined }))

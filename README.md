@@ -122,7 +122,7 @@ That model understands English. For other languages, put `ggml-small.bin` (or `g
 | `helpers/realtime-voice.mjs` | Reads one line with OpenAI's live voice and writes a WAV, with the time of each word. Takes are cached in `~/.cache/bob-voice`. |
 | `helpers/realtime-stream.mjs` | The streamed version: the voice starts as soon as the first sound arrives. |
 | `sounds/*.wav` | The send, heartbeat, question, done and tap sounds. |
-| `tests/*.test.tsx` | 97 tests covering every feature: each panel case (two things to copy, a choice between plans, sent files, links, a must-read), the Mac voice's word timing, the mute choices, 🎙 with Whisper and with OpenAI, and more. Run them with `claude plugin test .` |
+| `tests/*.test.tsx` | 98 tests covering every feature: each panel case (two things to copy, a choice between plans, sent files, links, a must-read), the Mac voice's word timing, the mute choices, 🎙 with Whisper and with OpenAI, and more. Run them with `claude plugin test .` |
 
 Inside `hooks/register.tsx`, the main pieces:
 
