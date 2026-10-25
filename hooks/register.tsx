@@ -1,10 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, Timer } from 'claude-code'
 
-import type { CaptionLine, Choice, Opened, PanelAsk, PlanItem, Reply, Settings } from '../types'
+import type { CaptionLine, Choice, MicState, Opened, PanelAsk, PlanItem, Reply, Settings } from '../types'
 
 const reply = atom({ plugin: 'bob-talks-back', key: 'reply' } as const, null)
 const owner = atom({ plugin: 'bob-talks-back', key: 'owner' } as const, '')
+// The 🔊 chooser (what to mute) while it is open.
+const muteMenu = atom({ plugin: 'bob-talks-back', key: 'muteMenu' } as const, false)
+// Talking to Claude through the orb.
+const mic = atom({ plugin: 'bob-talks-back', key: 'mic' } as const, { phase: 'off' } as MicState)
 const settings = atom({ plugin: 'bob-talks-back', key: 'settings' } as const, {
   isOn: true,
   isVoiceOn: true,
@@ -104,6 +108,9 @@ Speak as Claude, the assistant, in the first person ("I fixed..."); never use
 any other name for it.
 Keep who does what exactly as in the reply: "you" is the user, "I" is the
 assistant; never swap them.
+Never change what the reply says: same facts, numbers, names and files.
+If the reply warns about something (an error, a cost, something risky or
+fake), say it.
 Answer with those lines alone.`
 // The spoken line comes from the Claude that wrote the reply, which knows the conversation: a note at the very end
 // of each reply, written as markdown reference lines, which the chat does not show. The summary model only steps in
@@ -127,6 +134,10 @@ const PANEL_TOOL_SPEC = {
       points: { type: 'array', items: { type: 'string' }, maxItems: 3, description: 'Each other new thing in the reply, in a few words' },
       copy: { type: 'array', items: { type: 'string' }, description: 'A name for each code block the user should copy, in order' },
       options: { type: 'array', items: { type: 'string' }, maxItems: 4, description: 'The choices, when you ask the user to pick between named options' },
+      mustRead: {
+        type: 'string',
+        description: 'Only when the user truly has to read the full reply (steps to follow one by one, a long list, exact wording to check): why, in a few words',
+      },
     },
     required: ['tag', 'say'],
   },
@@ -139,11 +150,28 @@ const PANEL_TOOL_NOTE = [
   'points: one short line for each other new thing in the reply (at most 3), so nothing in it is missing from the panel.',
   'copy: put anything the user should copy (a tweet, a command, a prompt) in a code block, and name each one here, in order.',
   'options: up to 4 short choices, only when you ask the user to pick between named options.',
+  'mustRead: the goal is that the panel alone is enough. Only when something the user really needs cannot fit it (steps to follow one by one, a long list, exact wording to check), say why in a few words; the panel then tells them to open the full reply.',
   'Link every file you made or point the user to with its path, so the panel can give it an Open button.',
   'The user may only hear this, never read the reply: it must make sense on its own, so never use a word that only the reply explains (like "this link" or "that fix") without saying what it is. Plain words, first person, nothing that is not in the reply.',
 ].join('\n')
+// The panel tool, registered once: a fresh start refuses it until the chat is bound, so the first message tries again.
+let isPanelToolRegistered = false
+async function registerPanelTool($: EngineInterface) {
+  if (isPanelToolRegistered) return
+  try {
+    await $.tool.register(PANEL_TOOL_SPEC)
+    isPanelToolRegistered = true
+    log($, 'panel tool registered')
+  } catch (error) {
+    log($, `panel tool not registered yet: ${reasonOf(error).slice(0, 120)}`)
+  }
+}
 // The panel line the tool handed over for the reply being written.
-let toolNote: { gist: string; say: string; points: string[]; options: string[]; copy: string[] } | undefined
+type ToolNote = { gist: string; say: string; points: string[]; options: string[]; copy: string[]; mustRead?: string }
+let toolNote: ToolNote | undefined
+// The panel line a reply was finished with, kept for that reply: when it is finished again (Claude went on after a
+// reload ended it early), the same line stands instead of a summary written without it.
+let handedFor: { id: number; note: ToolNote } | undefined
 const SPOKEN_NOTE = [
   "End every reply with a hidden note for the user's voice panel: a blank line, then exactly these two lines, as the very last thing.",
   '[bob-tag]: # "Done: what got done, in at most 10 words"',
@@ -158,6 +186,8 @@ const SPOKEN_NOTE = [
   'Write it as you would say it to a friend: plain words, first person, nothing that is not in the reply, no double quotes and no | inside the parts, and no numbers or file names unless they are the point.',
 ].join('\n')
 const CLAUDE_ORANGE = '#D97757'
+// The orb while it listens to you.
+const MIC_RED = '#E5484D'
 // One accent only: the spoken word and a reply that needs you wear Claude's orange.
 const HIGHLIGHT = '#D97757'
 // The chip you picked: a faint wash of the same orange.
@@ -165,8 +195,7 @@ const CHIP_HOVER = '#D9775733'
 // Spaces inside the button's label, so the clickable part fills the chip.
 const CHIP_PAD = '\u2002'
 const SAMPLE_RATE = 24000
-// Where the person already keeps an OpenAI key; read when Bob speaks, kept in
-// memory only, never logged or stored.
+// Where the person keeps their OpenAI key; read when it is needed, kept in memory only, never logged or stored.
 const KEY_FILES = async ($: EngineInterface) => [`${(await $.env.get('HOME')) ?? ''}/.config/bob/openai.env`]
 const KEY_LINE = /^\s*(?:export\s+)?OPENAI(?:_API)?_KEY\s*=\s*["']?([^"'\s#]+)/m
 const VOICE_STYLE =
@@ -186,7 +215,7 @@ const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/
 // The spark's rays, longest 1: uneven like Claude's own mark.
 const RAYS = [1, 0.74, 0.92, 0.68, 0.98, 0.8, 0.7, 0.95, 0.76, 0.9, 0.66, 0.86]
 
-type Mood = 'idle' | 'thinking' | 'talking' | 'waiting'
+type Mood = 'idle' | 'thinking' | 'talking' | 'waiting' | 'listening'
 // `speed`: how much faster than spoken afplay plays it, the pitch kept.
 // `voiced`: where in the clip the voice actually sounds, in played ms; the
 // highlight moves only through these and holds still in the pauses.
@@ -229,10 +258,6 @@ async function engineOf($: EngineInterface): Promise<VoiceEngine> {
   const picked = (await read($, settings)).voiceEngine
   return picked === 'normal' || picked === 'live' ? picked : 'mac'
 }
-// The OpenAI key, only while one of the OpenAI voices is picked.
-async function openAiKey($: EngineInterface): Promise<string | undefined> {
-  return (await engineOf($)) === 'mac' ? undefined : findKey($)
-}
 const NODE_PATH = '/usr/bin/env'
 const LIVE_WAIT_MS = 12_000
 // The streamed live voice, and the pace it is learned to speak at (ms per
@@ -247,10 +272,10 @@ const VOICE_DEADLINE_MS = 15_000
 const VOICE_STYLES = ['pro', 'narrator']
 // The live model barely changes pace from wording; pro plays at this speed.
 const PRO_SPEED = 1
-// While Claude works: the first typing burst after this many seconds, then one
-// every TYPING_GAP_S to twice that.
-const TYPING_FIRST_S = 4
-const TYPING_GAP_S = 7
+// While Claude works: the first heartbeat after this many seconds, then one every HEARTBEAT_GAP_S, steady, so the
+// silence between two never makes you wonder whether Claude stopped.
+const HEARTBEAT_FIRST_S = 2
+const HEARTBEAT_GAP_S = 3
 let isPlaying = false
 let stopClip: AbortController | undefined
 let ticker: Timer | undefined
@@ -261,6 +286,10 @@ let isClipPlaying = false
 let clipTurn = 0
 let liveTurn = 0
 let isSpeaking = false
+// The orb's mic is open: no sound of Bob's plays into it.
+let isListening = false
+// A session nobody watches (claude -p, a script, an SDK host): Bob stays out of it, with no voice, sound or panel.
+let isHeadless = false
 let lastSpokeAt = 0
 // The sentence Bob has taken up (fetching its voice or saying it): the summary
 // queues behind it instead of replacing it.
@@ -324,20 +353,29 @@ function toLines(markdown: string, firstSentence: number): CaptionLine[] {
 }
 
 // A long opening is cut to its first part (its first phrases, up to OPENING_WORDS
-// words), so you get the gist as it arrives without a long, dense line.
+// words), so you get the gist as it arrives without a long, dense line. The part
+// must make sense alone: never cut before a "but" or an "if" that turns it
+// around, or right after a colon; asides in brackets are left out. With no such
+// cut, the whole sentence is said.
 const LONG_OPENING_WORDS = 20
 const OPENING_WORDS = 15
+const MAX_OPENING_WORDS = 22
+const TURNING_WORD = /^[-–—]?\s*(but|yet|though|although|however|except|unless|only|instead|whereas|not|if|until|once)\b/i
 function openingPart(sentence: string): string {
-  const words = sentence.split(/\s+/)
-  if (words.length < LONG_OPENING_WORDS) return sentence
-  let part = ''
-  for (const phrase of sentence.split(/(?<=[,:;])\s+|\s+(?=[-–—]\s)/)) {
-    const next = part === '' ? phrase : `${part} ${phrase}`
-    if (next.split(/\s+/).length > OPENING_WORDS) break
-    part = next
+  if (sentence.split(/\s+/).length < LONG_OPENING_WORDS) return sentence
+  const plain = sentence.replace(/\s*\([^()]*\)/g, '').replace(/\s+([,:;.!?])/g, '$1')
+  if (plain.split(/\s+/).length < LONG_OPENING_WORDS) return plain
+  const phrases = plain.split(/(?<=[,:;])\s+|\s+(?=[-–—]\s)/)
+  const cuts: string[] = []
+  for (let at = 1; at < phrases.length; at++) {
+    const part = phrases.slice(0, at).join(' ')
+    if (/[,;]$/.test(part) && !TURNING_WORD.test(phrases[at] ?? '')) cuts.push(part)
   }
-  if (part.split(/\s+/).length >= 5) return part.replace(/[,:;]$/, '.')
-  return `${words.slice(0, OPENING_WORDS).join(' ').replace(/[,:;]$/, '')}…`
+  const size = (part: string) => part.split(/\s+/).length
+  const cut =
+    cuts.filter(part => size(part) >= 5 && size(part) <= OPENING_WORDS).at(-1) ??
+    cuts.find(part => size(part) >= 5 && size(part) <= MAX_OPENING_WORDS)
+  return cut === undefined ? plain : cut.replace(/[,;]$/, '.')
 }
 
 // A sentence cut into caption lines at its natural breaks (commas, colons,
@@ -569,6 +607,13 @@ function sentenceAt(lines: CaptionLine[], start: number) {
 
 const weightOf = (word: string) => word.length + 2
 
+// A line still in place once its tone has played: the summary may have taken its place meanwhile, and a line it
+// replaced is never said, or you would hear it twice.
+async function isStillThere($: EngineInterface, id: number, text: string) {
+  const now = await read($, reply)
+  return now !== null && now.id === id && sentenceAt(now.lines, now.line).text === text
+}
+
 const SPINNER = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="14" height="14"><circle cx="8" cy="8" r="6" fill="none" stroke="${CLAUDE_ORANGE}" stroke-opacity="0.25" stroke-width="2"/><path d="M8 2 a6 6 0 0 1 6 6" fill="none" stroke="${CLAUDE_ORANGE}" stroke-width="2" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.9s" repeatCount="indefinite"/></path></svg>`
 
 type PlanInput = {
@@ -737,9 +782,11 @@ function moodOf(current: Reply | null): Mood {
 
 function spark(mood: Mood, isBouncing = false): string {
   // Waiting on you, the spark all but stops and glows slowly.
-  const spin = { idle: '60s', thinking: '4s', talking: '24s', waiting: '900s' }[mood]
-  const beat = { idle: '3.2s', thinking: '1.2s', talking: '0.42s', waiting: '2.6s' }[mood]
-  const [small, big] = { idle: [0.97, 1.02], thinking: [0.9, 1], talking: [0.86, 1.08], waiting: [0.97, 1.05] }[mood]
+  const spin = { idle: '60s', thinking: '4s', talking: '24s', waiting: '900s', listening: '10s' }[mood]
+  const beat = { idle: '3.2s', thinking: '1.2s', talking: '0.42s', waiting: '2.6s', listening: '0.7s' }[mood]
+  const [small, big] = { idle: [0.97, 1.02], thinking: [0.9, 1], talking: [0.86, 1.08], waiting: [0.97, 1.05], listening: [0.88, 1.06] }[mood]
+  // Listening to you, the spark turns red and its glow pulses, so you know the mic is open.
+  const color = mood === 'listening' ? MIC_RED : CLAUDE_ORANGE
   const rays = RAYS.map((length, at) => {
     const angle = (at / RAYS.length) * 2 * Math.PI + (at % 2 === 0 ? 0.05 : -0.04)
     const [x, y] = [Math.cos(angle), Math.sin(angle)]
@@ -754,14 +801,15 @@ function spark(mood: Mood, isBouncing = false): string {
     : ''
 
   // Thinking: a soft orange glow breathes slowly behind the spark.
+  const glowFor = mood === 'listening' ? '1.4s' : '3.2s'
   const halo =
-    mood === 'thinking'
-      ? `<defs><radialGradient id="glow"><stop offset="0%" stop-color="${CLAUDE_ORANGE}" stop-opacity="0.55"/><stop offset="60%" stop-color="${CLAUDE_ORANGE}" stop-opacity="0.18"/><stop offset="100%" stop-color="${CLAUDE_ORANGE}" stop-opacity="0"/></radialGradient></defs><circle r="40" fill="url(#glow)"><animate attributeName="opacity" values="0.25;0.9;0.25" dur="3.2s" repeatCount="indefinite"/><animate attributeName="r" values="34;40;34" dur="3.2s" repeatCount="indefinite"/></circle>`
+    mood === 'thinking' || mood === 'listening'
+      ? `<defs><radialGradient id="glow"><stop offset="0%" stop-color="${color}" stop-opacity="0.55"/><stop offset="60%" stop-color="${color}" stop-opacity="0.18"/><stop offset="100%" stop-color="${color}" stop-opacity="0"/></radialGradient></defs><circle r="40" fill="url(#glow)"><animate attributeName="opacity" values="0.25;0.9;0.25" dur="${glowFor}" repeatCount="indefinite"/><animate attributeName="r" values="34;40;34" dur="${glowFor}" repeatCount="indefinite"/></circle>`
       : ''
 
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-40 -40 80 80" width="88" height="88">
 ${halo}<g>${bounce}
-<g stroke="${CLAUDE_ORANGE}" stroke-width="6.5" stroke-linecap="round">
+<g stroke="${color}" stroke-width="6.5" stroke-linecap="round">
 <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="${spin}" repeatCount="indefinite"/>
 <g><animateTransform attributeName="transform" type="scale" values="${small};${big};${small}" dur="${beat}" repeatCount="indefinite"/>${rays}</g>
 </g>
@@ -823,8 +871,14 @@ function toWav(pcm: Uint8Array): Uint8Array {
   return wav
 }
 
-// Read afresh each time, so a key pasted in while Bob runs is used at once.
+// The key for Bob's voice: none while the Mac's own voice is picked, so OpenAI is never asked to speak.
 async function findKey($: EngineInterface): Promise<string | undefined> {
+  return (await engineOf($)) === 'mac' ? undefined : openAiKey($)
+}
+
+// Your OpenAI key, whichever voice speaks: talking to Claude with 🎙 needs it even with the Mac's voice.
+// Read afresh each time, so a key pasted in while Bob runs is used at once.
+async function openAiKey($: EngineInterface): Promise<string | undefined> {
   const fromEnv = await $.env.get('OPENAI_API_KEY')
   if (fromEnv) return fromEnv
   for (const path of await KEY_FILES($)) {
@@ -842,7 +896,7 @@ async function findKey($: EngineInterface): Promise<string | undefined> {
 // OpenAI's voice when a key is found; undefined sends the sentence to
 // the system voice instead.
 async function synthesize($: EngineInterface, text: string, asVoice?: string): Promise<Speech | undefined> {
-  const key = await openAiKey($)
+  const key = await findKey($)
   if (!key) {
     log($, 'voice: no OpenAI key found, using the system voice')
     return undefined
@@ -1072,6 +1126,90 @@ async function say($: EngineInterface, text: string) {
   }
 }
 
+// The Mac's own voice, each word lit the moment it is said. `say -i` redraws the line as it speaks, the word it is on in
+// reverse video, but only in a terminal: macOS's `script` gives it one and hands its output back here as it happens.
+// The terminal is made wide, as say redraws only the screen line it is on: in 80 columns a long line wraps, its marks
+// start again from the left, and the highlight would stall, then rush through the rest at the end.
+// 'failed' (nothing marked) lets the caller say it the old way; a line that was heard is never said twice.
+async function sayLine(
+  $: EngineInterface,
+  id: number,
+  sentence: Sentence,
+  opening?: { name: 'ask' | 'start'; leadMs: number },
+): Promise<'done' | 'cut' | 'failed'> {
+  if (opening !== undefined) {
+    cue($, opening.name, 0.7)
+    await wait($, opening.leadMs)
+  }
+  if (!(await isStillThere($, id, sentence.text))) return 'cut'
+  // Where each word starts in the line, to tell which one a mark is on.
+  const starts: number[] = []
+  sentence.words.reduce((at, one, index) => ((starts[index] = at), at + one.text.length + 1), 0)
+  const child = $.process.spawn({
+    argv: [
+      '/usr/bin/script', '-q', '/dev/null', '/bin/sh', '-c',
+      '/bin/stty cols 4000 2>/dev/null; exec /usr/bin/say -v "$0" -r "$1" -i "$2"', MAC_VOICE, String(SAY_WPM), sentence.text,
+    ],
+    env: { TERM: 'xterm-256color' },
+  })
+  isSaying = true
+  isSpeaking = true
+  const spawnedAt = await $.clock.now()
+  let marks = 0
+  let firstMarkMs = -1
+  let lit = -1
+  let isCut = false
+  let pending = ''
+  let sample = ''
+  try {
+    for await (const chunk of child) {
+      if (chunk.stream !== 'stdout' || isCut) continue
+      if (sample.length < 120) sample += chunk.text
+      pending += chunk.text
+      // Each redraw starts with a line clear; the last one may still be arriving.
+      const redraws = pending.split(/\r?\x1b\[M/)
+      pending = redraws.pop() ?? ''
+      for (const redraw of redraws) {
+        const mark = redraw.indexOf('\x1b[7m')
+        if (mark < 0) continue
+        if (marks++ === 0) firstMarkMs = (await $.clock.now()) - spawnedAt
+        const before = redraw.slice(0, mark).replace(/\x1b(\[[0-9;?]*[A-Za-z]|\([A-Z0-9])/g, '')
+        let index = starts.findIndex((start, at) => before.length >= start && before.length < (starts[at + 1] ?? Infinity))
+        if (index < 0) index = sentence.words.length - 1
+        // A mark behind the word being said came from a wrapped line counting from its left: it is the next word.
+        if (index < lit) index = lit + 1
+        // Every word up to the one being said lights in turn, so none is skipped.
+        for (; lit < index && !isCut; ) {
+          lit++
+          const spoken = sentence.words[lit]
+          if (spoken !== undefined && !(await highlight($, id, spoken))) isCut = true
+        }
+      }
+      if (isCut) hush($)
+    }
+  } catch (error) {
+    log($, `voice: say -i failed: ${reasonOf(error)}`)
+  } finally {
+    isSaying = false
+    isSpeaking = false
+  }
+  if (isCut) return 'cut'
+  const ended = await child.result.catch(() => undefined)
+  if (marks > 0) log($, `voice: say -i marked ${marks} words, the first ${firstMarkMs} ms in, the line ${(await $.clock.now()) - spawnedAt} ms`)
+  // Stopped before its first word because the reply moved on (your new message, a skip): cut, never failed.
+  if (lit < 0 && (await read($, reply))?.id !== id) return 'cut'
+  if (lit < 0) {
+    log($, `voice: say -i gave no word marks (exit ${ended?.code ?? '?'}), it began ${JSON.stringify(sample.slice(0, 80))}`)
+    // It ran to the end, so the line was heard: never say it a second time.
+    if (ended?.code !== 0) return 'failed'
+  }
+  for (lit++; lit < sentence.words.length; lit++) {
+    const spoken = sentence.words[lit]
+    if (spoken !== undefined && !(await highlight($, id, spoken))) return 'cut'
+  }
+  return 'done'
+}
+
 // Plays OpenAI's take through afplay, as the system voice plays through say:
 // a clip handed to the engine as bytes can be skipped without a sound.
 const clipPath = () => CLIP_PATHS[clipTurn] ?? `${CLIP_DIR}/line-a.wav`
@@ -1116,11 +1254,19 @@ function hush($: EngineInterface) {
   if (isClipPlaying) void $.process.run(['pkill', '-f', `^/usr/bin/afplay ${CLIP_DIR}/`]).catch(() => undefined)
 }
 
+// The sounds (send, heartbeat, ding, done) mute apart from the voice; a choice saved before they could follows the voice.
+const soundsOn = (now: Settings) => now.isSoundOn ?? now.isVoiceOn
+
 // A soft cue from Bob's sounds folder, quiet enough to stay in the background.
-// A new clip stops the one playing, so cues stay quiet while Bob speaks.
-function cue($: EngineInterface, name: 'think' | 'done' | 'ask' | 'heartbeat' | 'start' | 'end' | 'tap', gain: number) {
-  void read($, settings).then(({ isVoiceOn }) => {
-    if (!isVoiceOn || isSpeaking) return
+// A new clip stops the one playing, so cues stay quiet while Bob speaks, and while the mic listens to you.
+function cue(
+  $: EngineInterface,
+  name: 'think' | 'done' | 'ask' | 'heartbeat' | 'start' | 'end' | 'tap',
+  gain: number,
+  isForMic = false,
+) {
+  void read($, settings).then(now => {
+    if (!soundsOn(now as Settings) || isSpeaking || (isListening && !isForMic)) return
     const asset = {
       think: 'sounds/think.wav',
       done: 'sounds/done.wav',
@@ -1162,7 +1308,18 @@ function closingSentences(gist: string, choice: Choice | null, say: string, note
   // "Question for you." only leads a question that follows an explanation.
   if (say === '' && choice === null && tagOf(gist).tag === 'QUESTION FOR YOU') return [...notes, tagOf(gist).text]
   if (say === '') return needsYou(last) ? [...notes, last] : [last, ...notes]
+  // A spoken line that already ends on a question has asked it: no "Question for you." and no second question. Its
+  // question still comes last, after any notes, so it gets the ding; the panel shows the question as before.
+  const asked = last.startsWith(QUESTION_INTRO) ? endingQuestion(say) : undefined
+  if (asked !== undefined) return [...(asked.before === '' ? [] : [asked.before]), ...notes, asked.question]
   return needsYou(last) ? [say, ...notes, last] : [say, ...notes]
+}
+
+// A line's last sentence when it is a question, and what comes before it.
+function endingQuestion(text: string): { before: string; question: string } | undefined {
+  const sentences = text.trim().split(/(?<=[.!?])\s+/)
+  const question = sentences.pop() ?? ''
+  return /\?["')\]]*$/.test(question) ? { before: sentences.join(' '), question } : undefined
 }
 
 const needsYou = (text: string) => text.startsWith(QUESTION_INTRO) || text.startsWith(ATTENTION_INTRO)
@@ -1295,15 +1452,18 @@ function noteOf(answer: string) {
 }
 
 async function finishReply($: EngineInterface, id: number, answer: string, isAborted: boolean) {
-  const handed = toolNote
+  const handed = toolNote ?? (handedFor?.id === id ? handedFor.note : undefined)
   toolNote = undefined
+  if (handed !== undefined) handedFor = { id, note: handed }
+  const mustRead = handed?.mustRead
   const note = isAborted ? undefined : (handed ?? noteOf(answer))
   if (note) log($, handed ? 'gist from the panel tool' : 'gist from Claude\'s own note')
   const quick = note ?? (isAborted ? undefined : shortSummary(answer))
   const said = await read($, reply).then(now => {
     if (now === null) return ''
     const lastStart = now.blocks.length > 1 ? (now.blocks.at(-2)?.end ?? 0) : 0
-    const end = now.word >= 0 ? sentenceAt(now.lines, now.line).end : now.line
+    // A line the voice has started counts as said, even before its first word lights.
+    const end = now.word >= 0 || isSpeaking || isStreaming ? sentenceAt(now.lines, now.line).end : now.line
     return now.lines.slice(lastStart, end).flatMap(one => one.words).join(' ')
   })
   const summary =
@@ -1315,6 +1475,11 @@ async function finishReply($: EngineInterface, id: number, answer: string, isAbo
     (isAborted || answer.trim() === '' ? undefined : fallbackSummary(answer))
   const gist = summary?.gist
   if (gist) log($, `gist: ${gist} (+${summary?.options.length ?? 0} options)`)
+  // A must-read is said out loud; on the card its button says it, so the card's line stays as Claude wrote it.
+  const spokenSay =
+    mustRead !== undefined && summary?.say
+      ? `${summary.say} Open the full reply in the panel: ${mustRead.replace(/[.!]+$/, '')}.`
+      : (summary?.say ?? '')
   // A question asked in plain words, with named options, gets them as buttons
   // under it once Bob is done talking; a click sends that answer.
   const asked: Choice | null =
@@ -1328,7 +1493,7 @@ async function finishReply($: EngineInterface, id: number, answer: string, isAbo
     const { isVoiceOn } = await read($, settings)
     if (isVoiceOn) {
       const before = await read($, reply)
-      for (const sentence of unsaid(closingSentences(gist, before?.choice ?? asked, summary?.say ?? '', notes), said)) {
+      for (const sentence of unsaid(closingSentences(gist, before?.choice ?? asked, spokenSay, notes), said)) {
         void voiceFor($, sentence.split(/\s+/).join(' '))
       }
     }
@@ -1354,7 +1519,7 @@ async function finishReply($: EngineInterface, id: number, answer: string, isAbo
       Math.max(
         lastStart,
         // Lines before the pointer were already said: they stay.
-        now.word >= 0 && !isSilentShowing ? sentenceAt(now.lines, now.line).end : now.line,
+        (now.word >= 0 || isSpeaking || isStreaming) && !isSilentShowing ? sentenceAt(now.lines, now.line).end : now.line,
       ),
     )
     const first = (now.lines[keep - 1]?.sentence ?? -1) + 1
@@ -1365,7 +1530,7 @@ async function finishReply($: EngineInterface, id: number, answer: string, isAbo
       .flatMap(one => one.words)
       .join(' ')
       .toLowerCase()
-    const closing = unsaid(closingSentences(gist, choice, summary?.say ?? '', notes), said)
+    const closing = unsaid(closingSentences(gist, choice, spokenSay, notes), said)
       .flatMap((text, at) => toCaptionLines(text, first + at, true))
     const lines = [...now.lines.slice(0, keep), ...closing]
     const blocks = now.blocks.map((block, at) =>
@@ -1380,6 +1545,7 @@ async function finishReply($: EngineInterface, id: number, answer: string, isAbo
       choice,
       points: summary?.points ?? [],
       copyNames: handed?.copy,
+      mustRead,
       pointAt: 0,
       isWorking: false,
       line: Math.min(now.line, keep),
@@ -1413,8 +1579,8 @@ async function speakable($: EngineInterface, text: string): Promise<Speech | und
 // A line in the live voice, from the helper beside Bob's key file: it opens
 // OpenAI's Realtime connection, which a mod cannot open itself.
 async function synthesizeLive($: EngineInterface, text: string, asVoice?: string): Promise<Speech | undefined> {
-  // No key: the line goes to the system voice, never to OpenAI.
-  if ((await openAiKey($)) === undefined) return undefined
+  // No key, or the Mac's voice picked: the line goes to the system voice, never to OpenAI.
+  if ((await findKey($)) === undefined) return undefined
   try {
     const { voiceStyle } = await read($, settings)
     const style = typeof voiceStyle === 'string' && VOICE_STYLES.includes(voiceStyle) ? voiceStyle : 'narrator'
@@ -1557,6 +1723,33 @@ async function play($: EngineInterface) {
         continue
       }
 
+      // No OpenAI voice: the Mac's own, each word lit the moment it is said.
+      if (isVoiceOn && (await findKey($)) === undefined) {
+        const isForYou =
+          needsYou(sentence.text) ||
+          (current.lines[current.line]?.spoken === true && isFinal && sentence.text.trim().endsWith('?'))
+        log($, `say #${current.line} (mac): ${sentence.text}`)
+        const isFreshStart = (await $.clock.now()) - lastSpokeAt > RUN_GAP_MS
+        const opening = isForYou
+          ? ({ name: 'ask', leadMs: DING_GAP_MS } as const)
+          : isFreshStart
+            ? ({ name: 'start', leadMs: TONE_GAP_MS } as const)
+            : undefined
+        const outcome = await sayLine($, current.id, sentence, opening)
+        if (outcome === 'cut') {
+          log($, `line #${current.line} cut: the reply moved on`)
+          continue
+        }
+        if (outcome === 'done') {
+          lastSpokeAt = await $.clock.now()
+          await wait($, LINE_HOLD_MS)
+          await closingCue($, current.id, current.line, isFinal, isForYou)
+          await moveOn($, current.id, current.line, sentence)
+          continue
+        }
+        log($, 'voice: no word marks from say -i, timing the line by estimate')
+      }
+
       let speech: Speech | undefined
       if (isVoiceOn) {
         await measureClipLead($)
@@ -1581,7 +1774,7 @@ async function play($: EngineInterface) {
       const linePath = speech?.path ?? clipPath()
       // The Mac's own voice is a different person: with OpenAI reachable, a
       // line OpenAI could not voice in time shows as a silent caption instead.
-      const hasOpenAi = isVoiceOn && speech === undefined && (await openAiKey($)) !== undefined
+      const hasOpenAi = isVoiceOn && speech === undefined && (await findKey($)) !== undefined
       if (hasOpenAi) log($, `voice: no take for #${current.line} in time, showing it silently`)
       // Whether this line is heard at all: a silent caption runs on its own clock.
       const speaks = isVoiceOn && !hasOpenAi
@@ -1597,6 +1790,8 @@ async function play($: EngineInterface) {
       const isForYou =
         needsYou(sentence.text) ||
         (current.lines[current.line]?.spoken === true && sentence.end === current.lines.length && sentence.text.trim().endsWith('?'))
+      // With the voice muted and the sounds on, a question still gets its ding.
+      if (!speaks && isForYou) cue($, 'ask', 0.7)
       if (speaks) {
         // The ding always marks a question; the soft start tone only opens a
         // stretch of talking, never sits between two lines said back to back.
@@ -1608,6 +1803,10 @@ async function play($: EngineInterface) {
           cue($, 'start', 0.7)
           await wait($, TONE_GAP_MS)
         }
+      }
+      if (speaks && !(await isStillThere($, current.id, sentence.text))) {
+        log($, `line #${current.line} cut: replaced before it was said`)
+        continue
       }
       isSpeaking = speaks === true
       let hasEnded = false
@@ -1693,11 +1892,11 @@ async function play($: EngineInterface) {
         log($, `system voice took ${Math.round(spokeMs)}ms for ${Math.round(ms)}ms planned, pace ${pace.toFixed(2)}`)
       }
       await wait($, LINE_HOLD_MS)
-      if (speaks) {
+      {
         // After Bob's last word the finish sound says he is done (or that Claude
-        // needs you); if Claude is still at it, a little typing says so instead.
+        // needs you); if Claude is still at it, the heartbeat says so instead.
         // Nothing plays if Claude is about to talk again: only once the last
-        // queued line is said.
+        // queued line is said. With the voice muted, the sounds still say so.
         const after = await read($, reply)
         lastSpokeAt = await $.clock.now()
         const isMoreToSay = after !== null && sentenceAt(after.lines, current.line).end < after.lines.length
@@ -1765,6 +1964,13 @@ type CopySurface = Parameters<EngineInterface['ui']['copy']>[0]['surface']
 function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'brief' | 'pane' = 'band') {
   const { Box, Button, Text } = ui
   const answer = moodOf(current) === 'idle' ? toPlain(current.blocks.map(one => one.text).join('\n\n')) : ''
+  // The full reply as the chat draws it, without the hidden note.
+  const fullText = current.blocks
+    .map(one => one.text)
+    .join('\n\n')
+    .replace(/<!--[\s\S]*?(-->|$)/g, '')
+    .replace(/^\s*\[[^\]]+\]:\s*\S+.*$/gm, '')
+    .trim()
   if (current.prompt === '' && answer === '') return null
   const paragraphs = answer
     .split(/\n+/)
@@ -1779,7 +1985,8 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
   const { tag, isAsk, text } = choice !== null ? tagOf(`Question: ${choice.ask}`) : tagOf(current.gist)
   const limit = mode === 'pane' ? MAX_PROMPT : BAND_PROMPT
   // A reply that says much more than its summary gets a hint, so you know when the chat is worth a look.
-  const hasMore = mode === 'band' && choice === null && answer.split(/\s+/).filter(one => one !== '').length > MORE_WORDS
+  const isMustRead = mode === 'band' && current.mustRead !== undefined
+  const hasMore = isMustRead || (mode === 'band' && choice === null && answer.split(/\s+/).filter(one => one !== '').length > MORE_WORDS)
   const prompt = current.prompt.length > limit ? `${current.prompt.slice(0, limit).trimEnd()}…` : current.prompt
   const you = prompt !== '' && mode !== 'brief' && (
     <Box flexDirection="row" gap={1}>
@@ -1809,12 +2016,7 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
         {text !== '' ? text : (paragraphs[0] ?? '')}
       </Text>
       {!isAsk && current.say && mode !== 'brief' && <Text size="body">{current.say}</Text>}
-      {mode !== 'brief' &&
-        (current.points ?? []).map((point, at) => (
-          <Text key={`point${at}`} size="footnote" dimColor>
-            {`• ${point}`}
-          </Text>
-        ))}
+      {/* What you click comes first, right under the line: the panel is short, so the points go below. */}
       {choice !== null && choice.options.length > 0 && mode !== 'brief' && (
         <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1} marginTop={1}>
           {choice.options.map((option, at) => {
@@ -1834,6 +2036,46 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
           })}
         </Box>
       )}
+      {hasMore &&
+        (isMustRead && !current.isFullAnswer ? (
+          // A must-read is one button that says so, framed in Claude's orange with a "!" (the app draws its own white
+          // button, which a mod cannot recolor), then why.
+          <Box
+            flexDirection="row"
+            alignItems="center"
+            alignSelf="flex-start"
+            gap={1}
+            paddingX={1}
+            borderStyle="round"
+            borderColor={HIGHLIGHT}
+          >
+            <Text size="body" weight="bold" color={CLAUDE_ORANGE}>
+              !
+            </Text>
+            <Button key="fullbutton" variant="primary" label="Must read: full reply" onPress={() => actions.onFull()} />
+            <Text size="footnote" weight="semibold" color={CLAUDE_ORANGE}>
+              {current.mustRead}
+            </Text>
+          </Box>
+        ) : (
+          <Box flexDirection="row" gap={1}>
+            <Button
+              key="fullbutton"
+              variant="secondary"
+              label={current.isFullAnswer ? 'Hide full reply' : 'Full reply'}
+              onPress={() => actions.onFull()}
+            />
+            {/* The panel cannot select text: the whole reply goes to the clipboard, to paste and keep the part you need. */}
+            {current.isFullAnswer && (
+              <Button
+                key="copyfull"
+                variant="secondary"
+                label={current.copied === fullText ? '✓ Copied' : 'Copy all'}
+                onPress={press => actions.onCopy(fullText, press.surface)}
+              />
+            )}
+          </Box>
+        ))}
       {current.failure && (
         <Box flexDirection="row" alignItems="center" gap={1}>
           <Text size="footnote" weight="medium" color={FAILURE_RED}>
@@ -1898,22 +2140,22 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
             </Text>
           </Box>
         ))}
-      {hasMore && (
-        <Box flexDirection="row">
-          <Button
-            key="fullbutton"
-            variant="secondary"
-            label={current.isFullAnswer ? 'Hide full reply' : 'Full reply'}
-            onPress={() => actions.onFull()}
-          />
-        </Box>
-      )}
+      {mode !== 'brief' &&
+        (current.points ?? []).map((point, at) => (
+          <Text key={`point${at}`} size="footnote" dimColor>
+            {`• ${point}`}
+          </Text>
+        ))}
       {hasMore &&
         current.isFullAnswer &&
-        paragraphs.map((paragraph, at) => (
-          <Text key={`full${at}`} size="body" dimColor>
-            {paragraph}
-          </Text>
+        ('Markdown' in ui ? (
+          <ui.Markdown key="fullreply" text={fullText} />
+        ) : (
+          paragraphs.map((paragraph, at) => (
+            <Text key={`full${at}`} size="body">
+              {paragraph}
+            </Text>
+          ))
         ))}
       {you}
       {mode === 'pane' &&
@@ -2374,6 +2616,7 @@ async function sendAnswer($: EngineInterface, text: string) {
 async function startReply($: EngineInterface, prompt: string): Promise<number> {
   hush($)
   toolNote = undefined
+  handedFor = undefined
   const fresh = await update($, reply, one => newReply((one?.id ?? 0) + 1, prompt))
   startTicking($)
   cue($, 'think', 0.3)
@@ -2423,14 +2666,14 @@ function newReply(id: number, prompt = ''): Reply {
 // Counts the seconds of the reply being worked on, for the status line.
 function startTicking($: EngineInterface) {
   ticker?.cancel()
-  let nextTypingAt = TYPING_FIRST_S
+  let nextBeatAt = HEARTBEAT_FIRST_S
   ticker = $.clock.every(1000, () => {
     void update($, reply, now =>
       now !== null && now.isWorking ? { ...now, seconds: now.seconds + 1 } : now,
     ).then(now => {
-      // A soft burst of typing now and then, so you can hear Claude working.
-      if (now === null || !now.isWorking || now.waiting || now.seconds < nextTypingAt) return
-      nextTypingAt = now.seconds + TYPING_GAP_S + Math.floor(Math.random() * TYPING_GAP_S)
+      // A steady heartbeat, so you can hear Claude working.
+      if (now === null || !now.isWorking || now.waiting || now.seconds < nextBeatAt) return
+      nextBeatAt = now.seconds + HEARTBEAT_GAP_S
       cue($, 'heartbeat', 0.8)
     })
   })
@@ -2474,12 +2717,290 @@ async function addText($: EngineInterface, text: string) {
 async function saveSettings($: EngineInterface, change: (now: Settings) => Settings) {
   await update($, settings, now => change(now as Settings))
   await $.store.set(STORE_KEY, await read($, settings))
-  // 🔇 silences everything at once: Bob's voice and every sound under way.
-  const { isVoiceOn } = await read($, settings)
-  if (!isVoiceOn) {
-    hush($)
-    playingCues.forEach(stop => stop.abort())
+  // Muting stops at once what is under way: the voice, the sounds, or both.
+  const now = (await read($, settings)) as Settings
+  if (!now.isVoiceOn) hush($)
+  if (!soundsOn(now)) playingCues.forEach(stop => stop.abort())
+}
+
+// The 🔊 chooser's four picks: what stays on.
+const MUTE_PICKS = [
+  { key: 'mute-none', label: 'All on', isVoiceOn: true, isSoundOn: true },
+  { key: 'mute-sounds', label: 'Mute sounds', isVoiceOn: true, isSoundOn: false },
+  { key: 'mute-voice', label: 'Mute voice', isVoiceOn: false, isSoundOn: true },
+  { key: 'mute-all', label: 'Mute all', isVoiceOn: false, isSoundOn: false },
+] as const
+
+async function pickMute($: EngineInterface, pick: (typeof MUTE_PICKS)[number]) {
+  await update($, muteMenu, () => false)
+  await saveSettings($, now => ({ ...now, isVoiceOn: pick.isVoiceOn, isSoundOn: pick.isSoundOn }))
+}
+
+// Talking to Claude: click 🎙 (it turns red), talk, click it again. ffmpeg records the mic, Whisper writes out what
+// you said on this Mac (free, offline), or OpenAI does when there is no Whisper, and it goes in the message box for
+// you to send. (The app hands a mod's drawings no press-and-hold, nor a click on the orb.)
+const MIC_PATH = `${CLIP_DIR}/mic.wav`
+const MIC_MAX_S = 120
+// Quieter than this all through, the mic heard nothing.
+const MIC_SILENT_DB = -50
+const TRANSCRIBE_MODEL = 'gpt-4o-mini-transcribe'
+const FFMPEG_PATHS = ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg']
+const WHISPER_CLIS = ['/opt/homebrew/bin/whisper-cli', '/usr/local/bin/whisper-cli']
+// Whisper's speech models, looked for in ~/.config/bob, best first; an .en model hears English only.
+const WHISPER_MODELS = ['ggml-large-v3-turbo.bin', 'ggml-small.bin', 'ggml-small.en.bin', 'ggml-base.bin', 'ggml-base.en.bin']
+// Inputs that carry the Mac's own sound, never a voice; app mics (a phone's, a filter's) come after real ones.
+const LOOPBACK_MIC = /blackhole|loopback|soundflower|background music|zoomaudio|teams audio|aggregate|multi-output/i
+const APP_MIC = /camo|krisp|virtual|nvidia|elgato|obs|descript|riverside/i
+
+let micOpenAt: number | undefined
+let micRecording: Promise<boolean> | undefined
+let micNames: string[] = []
+// Mics that stayed silent while you talked, before any mic had heard you: passed over from then on.
+const silentMics = new Set<string>()
+
+async function firstFile($: EngineInterface, paths: string[]): Promise<string | undefined> {
+  for (const path of paths) if (await $.fs.exists(path).catch(() => false)) return path
+  return undefined
+}
+
+const ffmpegOf = ($: EngineInterface) => firstFile($, FFMPEG_PATHS)
+
+// Free, offline writing out: whisper.cpp and one of its speech models, when both are on this Mac.
+async function whisperOf($: EngineInterface): Promise<{ cli: string; model: string } | undefined> {
+  const cli = await firstFile($, WHISPER_CLIS)
+  if (cli === undefined) return undefined
+  const home = (await $.env.get('HOME')) ?? ''
+  const model = await firstFile($, WHISPER_MODELS.map(name => `${home}/.config/bob/${name}`))
+  return model === undefined ? undefined : { cli, model }
+}
+
+// The mics ffmpeg can open, by name, in the order macOS lists them.
+async function listMics($: EngineInterface, ffmpeg: string): Promise<string[]> {
+  const listed = await $.process
+    .run([ffmpeg, '-hide_banner', '-f', 'avfoundation', '-list_devices', 'true', '-i', ''], { timeoutMs: 10_000 })
+    .catch(() => undefined)
+  const text = listed?.stderr ?? ''
+  const audio = text.slice(Math.max(0, text.indexOf('audio devices:')))
+  return [...audio.matchAll(/\] \[\d+\] (.+)$/gm)].map(found => (found[1] ?? '').trim()).filter(name => name !== '')
+}
+
+// The mics to talk into, best first: the one you picked or that last heard you, then real mics, then app mics.
+function micOrder(names: string[], picked?: string): string[] {
+  const real = names.filter(name => !LOOPBACK_MIC.test(name))
+  const ordered = [...real.filter(name => !APP_MIC.test(name)), ...real.filter(name => APP_MIC.test(name))]
+  return picked !== undefined && ordered.includes(picked) ? [picked, ...ordered.filter(name => name !== picked)] : ordered
+}
+
+// 🎙 starts listening; the same button again finishes. Nothing to do while it writes out what you said.
+async function micToggle($: EngineInterface) {
+  const state = await read($, mic)
+  if (state.phase === 'off') {
+    await update($, mic, () => ({ phase: 'starting' }))
+    void startMic($)
+  } else if (state.phase !== 'writing') {
+    void stopMic($)
   }
+}
+
+async function startMic($: EngineInterface) {
+  micRecording = undefined
+  const cannot = async (why: string) => {
+    await update($, mic, () => ({ phase: 'off' }))
+    $.ui.toast(why)
+  }
+  if ((await whisperOf($)) === undefined && (await openAiKey($)) === undefined) {
+    return cannot('Talking to Claude needs Whisper (brew install whisper-cpp, a model in ~/.config/bob) or an OpenAI key')
+  }
+  const ffmpeg = await ffmpegOf($)
+  if (ffmpeg === undefined) return cannot('Talking to Claude needs ffmpeg: brew install ffmpeg')
+  if (micNames.length === 0) micNames = await listMics($, ffmpeg)
+  const order = micOrder(micNames, ((await read($, settings)) as Settings).micName)
+  const device = order.find(name => !silentMics.has(name)) ?? order[0]
+  if (device === undefined) return cannot('No microphone found')
+  // Clicked again before the mic could open: nothing to record.
+  if ((await read($, mic)).phase !== 'starting') return
+  await update($, mic, one => ({ ...one, device }))
+  // You have the floor: Bob stops talking and no sound plays into the mic.
+  await skip($)
+  playingCues.forEach(stop => stop.abort())
+  isListening = true
+  await $.process.run(['/bin/mkdir', '-p', CLIP_DIR]).catch(() => undefined)
+  log($, `mic: listening on ${device}`)
+  micRecording = (async () => {
+    const child = $.process.spawn({
+      argv: [ffmpeg, '-hide_banner', '-nostdin', '-f', 'avfoundation', '-i', `:${device}`, '-ac', '1', '-ar', '16000', '-t', String(MIC_MAX_S), '-y', MIC_PATH],
+    })
+    let isOpen = false
+    let output = ''
+    try {
+      for await (const chunk of child) {
+        if (output.length < 4000) output += chunk.text
+        if (!isOpen && output.includes('Output #0')) {
+          isOpen = true
+          micOpenAt = await $.clock.now()
+          cue($, 'start', 0.7, true)
+          await update($, mic, one => (one.phase === 'starting' ? { ...one, phase: 'listening' } : one))
+        }
+      }
+    } catch (error) {
+      log($, `mic: ffmpeg failed: ${reasonOf(error)}`)
+    }
+    if (!isOpen) log($, `mic: ffmpeg could not open ${device}: ${output.slice(-300)}`)
+    return isOpen
+  })()
+  // Two minutes up, or the mic never opened: it ends as if you clicked.
+  void micRecording.then(async isOpen => {
+    const now = await read($, mic)
+    if (now.phase !== 'starting' && now.phase !== 'listening') return
+    if (isOpen) return stopMic($)
+    isListening = false
+    await update($, mic, () => ({ phase: 'off' }))
+    $.ui.toast(`Couldn't open the mic (${device}). Check that Claude may use the microphone.`)
+  }).catch(error => log($, `mic: ${reasonOf(error)}`))
+}
+
+async function stopMic($: EngineInterface) {
+  const state = await read($, mic)
+  if (state.phase !== 'starting' && state.phase !== 'listening') return
+  isListening = false
+  if (micRecording === undefined) {
+    await update($, mic, () => ({ phase: 'off' }))
+    return
+  }
+  await update($, mic, one => ({ ...one, phase: 'writing' }))
+  const talkedMs = micOpenAt === undefined ? 0 : (await $.clock.now()) - micOpenAt
+  await $.process.run(['/usr/bin/pkill', '-INT', '-f', MIC_PATH]).catch(() => undefined)
+  const isOpen = (await micRecording) === true
+  const text = isOpen ? await heardText($, state.device ?? '', talkedMs) : undefined
+  micOpenAt = undefined
+  if (text === undefined || text === '') {
+    await update($, mic, () => ({ phase: 'off' }))
+    return
+  }
+  await typeOut($, text)
+}
+
+// What you said, written out by OpenAI; undefined when the mic heard nothing or the writing failed (a toast says so).
+async function heardText($: EngineInterface, device: string, talkedMs: number): Promise<string | undefined> {
+  const ffmpeg = (await ffmpegOf($)) ?? 'ffmpeg'
+  const level = await $.process
+    .run([ffmpeg, '-hide_banner', '-nostdin', '-i', MIC_PATH, '-af', 'volumedetect', '-f', 'null', '-'], { timeoutMs: 15_000 })
+    .catch(() => undefined)
+  const loudest = Number(/max_volume:\s*(-?[\d.]+) dB/.exec(level?.stderr ?? '')?.[1] ?? Number.NEGATIVE_INFINITY)
+  if (!(loudest > MIC_SILENT_DB)) {
+    const { micName } = (await read($, settings)) as Settings
+    // No mic has heard you yet and this one stayed silent while you talked: the next one gets its turn.
+    if (micName === undefined && talkedMs >= 1500) silentMics.add(device)
+    const next = silentMics.has(device) ? micOrder(micNames).find(name => !silentMics.has(name)) : undefined
+    log($, `mic: ${device} heard nothing (loudest ${loudest} dB)`)
+    $.ui.toast(
+      next !== undefined
+        ? `${device} heard nothing. Next time I'll listen on ${next}.`
+        : `${device} heard nothing. Pick another mic with /bob mic`,
+    )
+    return undefined
+  }
+  const whisper = await whisperOf($)
+  const text = whisper !== undefined ? await whisperText($, whisper) : await openAiText($)
+  if (text === undefined) return undefined
+  if (text === '') {
+    $.ui.toast("I didn't catch any words. Try again a little closer to the mic.")
+    return undefined
+  }
+  // This mic heard you: it's the one from now on.
+  if (((await read($, settings)) as Settings).micName !== device) await saveSettings($, now => ({ ...now, micName: device }))
+  log($, `mic: heard ${text.length} characters (${whisper !== undefined ? 'Whisper' : 'OpenAI'})`)
+  return text
+}
+
+// Whisper on this Mac: a second or so, nothing leaves it. Its marks for no speech ("[BLANK_AUDIO]") are dropped.
+async function whisperText($: EngineInterface, whisper: { cli: string; model: string }): Promise<string | undefined> {
+  const language = /\.en\.bin$/.test(whisper.model) ? 'en' : 'auto'
+  const result = await $.process
+    .run([whisper.cli, '-m', whisper.model, '-f', MIC_PATH, '-nt', '-np', '-l', language], { timeoutMs: 60_000 })
+    .catch(error => ({ exitCode: 1, stdout: '', stderr: reasonOf(error) }))
+  if (result.exitCode !== 0) {
+    log($, `mic: Whisper failed: ${result.stderr.trim().slice(-200)}`)
+    // OpenAI writes it out instead, when there is a key.
+    if ((await openAiKey($)) !== undefined) return openAiText($)
+    $.ui.toast("Whisper couldn't write out what you said")
+    return undefined
+  }
+  return result.stdout
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+// OpenAI's speech-to-text, with your key.
+async function openAiText($: EngineInterface): Promise<string | undefined> {
+  const key = await openAiKey($)
+  // The key goes to curl on its standard input, never in its arguments, where other programs could read it.
+  const result = await $.process
+    .run(
+      ['/usr/bin/curl', '-sS', '--max-time', '30', '-K', '-', '-F', `model=${TRANSCRIBE_MODEL}`, '-F', `file=@${MIC_PATH}`,
+        'https://api.openai.com/v1/audio/transcriptions'],
+      { stdin: `header = "Authorization: Bearer ${key ?? ''}"\n`, timeoutMs: 35_000 },
+    )
+    .catch(error => ({ exitCode: 1, stdout: '', stderr: reasonOf(error) }))
+  let answer: { text?: string; error?: { message?: string } } = {}
+  try {
+    answer = JSON.parse(result.stdout) as typeof answer
+  } catch {
+    answer = { error: { message: result.stderr.trim() || 'no answer' } }
+  }
+  if (typeof answer.text !== 'string') {
+    log($, `mic: writing it out failed: ${answer.error?.message ?? 'no text'}`)
+    $.ui.toast(`Couldn't write out what you said: ${(answer.error?.message ?? 'no answer').slice(0, 120)}`)
+    return undefined
+  }
+  return answer.text.trim()
+}
+
+// Into the message box, after anything you already typed; you press Send. Where the box can't take it, the panel
+// holds it with Send and Copy.
+async function typeOut($: EngineInterface, text: string) {
+  const box = await $.prompt.read().catch(() => undefined)
+  const draft = box?.text ?? ''
+  const glue = draft !== '' && !/\s$/.test(draft) ? ' ' : ''
+  const filled = await $.prompt.fill({ text: `${glue}${text}`, mode: 'append' }).catch(() => undefined)
+  if (filled?.isFilled === true) {
+    await update($, mic, () => ({ phase: 'off' }))
+    cue($, 'tap', 0.8)
+    return
+  }
+  log($, `mic: the message box did not take it (${filled?.refusal ?? 'unknown'}), it waits in the panel`)
+  await update($, mic, () => ({ phase: 'off', draft: text }))
+}
+
+async function sendDraft($: EngineInterface) {
+  const { draft } = await read($, mic)
+  if (!draft) return
+  await update($, mic, one => ({ ...one, draft: undefined }))
+  await sendAnswer($, draft)
+}
+
+async function copyDraft($: EngineInterface, surface: CopySurface) {
+  const { draft } = await read($, mic)
+  if (draft) await copyCommand($, draft, surface)
+}
+
+// /bob mic lists the mics; /bob mic <name or number> picks the one to talk into.
+async function pickMic($: EngineInterface, wanted: string): Promise<string> {
+  const ffmpeg = await ffmpegOf($)
+  if (ffmpeg === undefined) return 'Talking to Claude needs ffmpeg: brew install ffmpeg'
+  micNames = await listMics($, ffmpeg)
+  const { micName } = (await read($, settings)) as Settings
+  const order = micOrder(micNames, micName)
+  if (wanted === '') {
+    if (order.length === 0) return 'No microphone found.'
+    return `Mics: ${order.map((name, at) => `${at + 1}. ${name}${at === 0 ? ' (in use)' : ''}`).join(', ')}. Pick one with /bob mic <number>.`
+  }
+  const byNumber = /^\d+$/.test(wanted) ? order[Number(wanted) - 1] : undefined
+  const picked = byNumber ?? order.find(name => name.toLowerCase().includes(wanted.toLowerCase()))
+  if (picked === undefined) return `No mic called ${wanted}. Try /bob mic to see them.`
+  await saveSettings($, now => ({ ...now, micName: picked }))
+  return `Talking to Claude through ${picked}.`
 }
 
 function skip($: EngineInterface) {
@@ -2500,7 +3021,12 @@ type RenderEvent = Parameters<EngineInterface['ui']['resolve']>[0]
 // band above the message box draws him, and so does his side panel, which the
 // app keeps on screen when its own next-step box takes the band's place.
 async function drawStage($: EngineInterface, e: RenderEvent, where: 'band' | 'pane') {
-  const { isVoiceOn, isCardInPane, isCompact } = await read($, settings)
+  const shown = (await read($, settings)) as Settings
+  const { isVoiceOn, isCardInPane, isCompact } = shown
+  const isSoundOn = soundsOn(shown)
+  const isMuteMenuOpen = (await read($, muteMenu)) === true
+  const micNow = await read($, mic)
+  const isMicOpen = micNow.phase === 'starting' || micNow.phase === 'listening'
   const current = await read($, reply)
   const mood = moodOf(current)
   const line = mood === 'talking' ? current?.lines[current.line] : undefined
@@ -2512,12 +3038,16 @@ async function drawStage($: EngineInterface, e: RenderEvent, where: 'band' | 'pa
   const orbSize = isCompact === true && where === 'band' ? 44 : isDone ? 72 : 104
   const ui = $.ui.resolve(e)
   const { Box, Button, Text } = ui
+  // While the mic listens, the orb turns red; only its look changes, the layout stays put.
+  const look: Mood = isMicOpen ? 'listening' : mood
   const orb =
     'Svg' in ui ? (
-      <ui.Svg source={spark(mood, isDone)} alt={`Claude, ${mood}`} width={orbSize} height={orbSize} isInteractive />
+      <ui.Svg source={spark(look, isDone)} alt={`Claude, ${look}`} width={orbSize} height={orbSize} isInteractive />
     ) : (
       <Text color={CLAUDE_ORANGE}>✻</Text>
     )
+  // 🎙 itself shows the state, in its place: red while it records, an hourglass while it writes out what you said.
+  const micLabel = isMicOpen ? '🔴' : micNow.phase === 'writing' ? '⏳' : '🎙'
   const spinner =
     'Svg' in ui ? (
       <ui.Svg source={SPINNER} alt="working" width={14} height={14} isInteractive />
@@ -2551,7 +3081,36 @@ async function drawStage($: EngineInterface, e: RenderEvent, where: 'band' | 'pa
           </Text>
         </Box>
       ) : null}
+      {/* What you said, when the message box could not take it: Send it, copy it, or drop it. */}
+      {micNow.draft ? (
+        <Box flexDirection="row" alignItems="center" gap={2} marginBottom={1}>
+          <Box flexGrow={1} flexShrink={1}>
+            <Text>{micNow.draft}</Text>
+          </Box>
+          <Button key="mic-send" variant="primary" label="Send" onPress={() => sendDraft($)} />
+          <Button key="mic-copy" variant="secondary" label="Copy" onPress={e => copyDraft($, e.surface)} />
+          <Button key="mic-drop" plain dimColor label="✕" onPress={() => update($, mic, one => ({ ...one, draft: undefined }))} />
+        </Box>
+      ) : null}
+      {/* While open, the 🔊 chooser takes the top row and the icons step aside: four small picks, the current one ticked. */}
+      {isMuteMenuOpen ? (
+        <Box flexDirection="row" justifyContent="flex-end" alignItems="center" gap={2}>
+          {MUTE_PICKS.map(pick => {
+            const isPicked = pick.isVoiceOn === isVoiceOn && pick.isSoundOn === isSoundOn
+            return (
+              <Button
+                key={pick.key}
+                plain
+                dimColor={!isPicked}
+                label={isPicked ? `✓ ${pick.label}` : pick.label}
+                onPress={() => pickMute($, pick)}
+              />
+            )
+          })}
+        </Box>
+      ) : null}
       {/* The icons float over the top-right corner, so they take no row. */}
+      {isMuteMenuOpen ? null : (
       <Box position="absolute" top={0} right={0} flexDirection="row" alignItems="center" gap={2}>
         <Button
           key="pane"
@@ -2567,12 +3126,13 @@ async function drawStage($: EngineInterface, e: RenderEvent, where: 'band' | 'pa
           label={isCompact ? '+' : '–'}
           onPress={() => saveSettings($, now => ({ ...now, isCompact: !now.isCompact }))}
         />
+        <Button key="mic" plain dimColor={micNow.phase === 'off'} label={micLabel} onPress={() => micToggle($)} />
         <Button
           key="voice"
           plain
           dimColor
-          label={isVoiceOn ? '🔊' : '🔇'}
-          onPress={() => saveSettings($, now => ({ ...now, isVoiceOn: !now.isVoiceOn }))}
+          label={isVoiceOn && isSoundOn ? '🔊' : isVoiceOn || isSoundOn ? '🔉' : '🔇'}
+          onPress={() => update($, muteMenu, () => true)}
         />
         <Button
           key="off"
@@ -2582,6 +3142,7 @@ async function drawStage($: EngineInterface, e: RenderEvent, where: 'band' | 'pa
           onPress={() => saveSettings($, now => ({ ...now, isOn: false }))}
         />
       </Box>
+      )}
 
       {isDone && current !== null && (
         <Box flexDirection="row" gap={2} alignItems="flex-start">
@@ -2709,8 +3270,10 @@ export const register: Register = (on, options) => {
   voice = String(options.voice ?? 'ash')
 
   on('session.start', async ($, e, next) => {
+    isHeadless = e.isInteractive === false
+    if (isHeadless) return next(e)
     await resumeLogs($)
-    await $.tool.register(PANEL_TOOL_SPEC).catch(error => log($, `panel tool not registered: ${reasonOf(error)}`))
+    await registerPanelTool($)
     sessionCwd = typeof e.cwd === 'string' ? e.cwd : ''
     log($, 'loaded')
     if ((await read($, owner)) === '') await update($, owner, () => `chat-${Date.now()}-${Math.floor(Math.random() * 1e6)}`)
@@ -2751,8 +3314,8 @@ export const register: Register = (on, options) => {
 
     await $.command.register({
       name: 'bob',
-      description: 'Claude captions: /bob on, off, voice, voices, voice <name>, style, sync earlier|later, skip or all',
-      argumentHint: 'on | off | voice | voices | voice ash | style pro | sync earlier | sync later | skip | all',
+      description: 'Claude talks back: /bob on, off, voice, mac, normal, live, voices, voice <name>, mic, style, sync, skip or all',
+      argumentHint: 'on | off | voice | mac | normal | live | voices | voice ash | mic | style pro | sync earlier | skip | all',
     })
 
     return next(e)
@@ -2774,15 +3337,6 @@ export const register: Register = (on, options) => {
       const { syncMs } = await read($, settings)
       return { text: `Highlight ${nudge}: now ${syncMs} ms against the voice.` }
     }
-    if (VOICE_ENGINES.includes(arg)) {
-      const engine = arg as VoiceEngine
-      voiceCache.clear()
-      await saveSettings($, now => ({ ...now, voiceEngine: engine }))
-      if (engine !== 'mac' && (await findKey($)) === undefined) {
-        return { text: `Claude will speak with ${ENGINE_NAMES[engine]} once your OpenAI key is in ~/.config/bob/openai.env. Until then it's the Mac's voice.` }
-      }
-      return { text: `Claude now speaks with ${ENGINE_NAMES[engine]}.` }
-    }
     if (arg === 'voices') {
       $.clock.after(0, () => void playSamples($))
       return { text: `Playing ${SAMPLE_VOICES.join(', ')}, one after another. Pick one with /bob voice <name>.` }
@@ -2802,6 +3356,15 @@ export const register: Register = (on, options) => {
       await saveSettings($, now => ({ ...now, voiceName: picked }))
       return { text: `Claude now speaks in the ${picked} voice.` }
     }
+    if (VOICE_ENGINES.includes(arg)) {
+      const engine = arg as VoiceEngine
+      voiceCache.clear()
+      await saveSettings($, now => ({ ...now, voiceEngine: engine }))
+      if (engine !== 'mac' && (await openAiKey($)) === undefined) {
+        return { text: `Claude will speak with ${ENGINE_NAMES[engine]} once your OpenAI key is in ~/.config/bob/openai.env. Until then it's the Mac's voice.` }
+      }
+      return { text: `Claude now speaks with ${ENGINE_NAMES[engine]}.` }
+    }
     if (arg === 'voice') {
       await saveSettings($, now => ({ ...now, isVoiceOn: !now.isVoiceOn }))
       const { isVoiceOn } = await read($, settings)
@@ -2811,6 +3374,7 @@ export const register: Register = (on, options) => {
       await skip($)
       return { text: 'Skipped to the end of the reply.' }
     }
+    if (arg === 'mic' || arg.startsWith('mic ')) return { text: await pickMic($, arg.slice(3).trim()) }
     if (arg === 'all') {
       await showAll($)
       return { text: 'Showing the full reply.' }
@@ -2818,14 +3382,17 @@ export const register: Register = (on, options) => {
 
     const { isOn, isVoiceOn } = await read($, settings)
     const engine = await engineOf($)
-    const speaking = engine === 'mac' || (await findKey($)) === undefined ? ENGINE_NAMES.mac : `${ENGINE_NAMES[engine]}, ${voice}`
+    const speaking = (await findKey($)) === undefined ? ENGINE_NAMES.mac : `${ENGINE_NAMES[engine]}, ${voice}`
     return {
-      text: `Captions ${isOn ? 'on' : 'off'}, voice ${isVoiceOn ? 'on' : 'off'} (${speaking}). Use /bob on, off, voice, mac, normal, live, skip or all.`,
+      text: `Captions ${isOn ? 'on' : 'off'}, voice ${isVoiceOn ? 'on' : 'off'} (${speaking}). Use /bob on, off, voice, mac, normal, live, mic, skip or all.`,
     }
   })
 
   // A new prompt starts a new reply; whatever was still being said stops.
   on('prompt.submit', async ($, e, next) => {
+    if (isHeadless) return next(e)
+    // A fresh start refused the panel tool before the chat was bound: by the first message it is.
+    if (!isPanelToolRegistered) void registerPanelTool($)
     if (e.isMeta || e.command) return next(e)
     const text = e.text.trim()
     const origin = e.origin as { kind?: string; name?: string } | undefined
@@ -2877,12 +3444,14 @@ export const register: Register = (on, options) => {
     const tag = typeof input.tag === 'string' ? input.tag : ''
     const say = typeof input.say === 'string' ? input.say : ''
     const parsed = parseGist([tag, `Say: ${say}`, ...list(input.points).map(one => `- ${one}`), ...list(input.options).map(one => `> ${one}`)].join('\n'))
-    toolNote = parsed === undefined ? undefined : { ...parsed, copy: list(input.copy) }
+    const mustRead = typeof input.mustRead === 'string' && input.mustRead.trim() !== '' ? input.mustRead.trim() : undefined
+    toolNote = parsed === undefined ? undefined : { ...parsed, copy: list(input.copy), mustRead }
     log($, `panel tool: ${tag}`)
     return { result: 'Shown in the voice panel.' }
   })
 
   on('session.append', async ($, e, next) => {
+    if (isHeadless) return next(e)
     const stored = await next(e)
     if (e.door !== 'response' || e.agentId !== undefined) return stored
     await stillWorking($)
@@ -2897,6 +3466,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
+    if (isHeadless) return next(e)
     if (e.agentId !== undefined) return next(e)
     const tool = String(e.tool)
     const input = e as unknown as Record<string, unknown>
@@ -2998,6 +3568,7 @@ export const register: Register = (on, options) => {
   // answer it from the panel; with no answer in ten minutes, the app's own
   // dialog is left to answer.
   on('classic.PermissionRequest', async ($, e, next) => {
+    if (isHeadless) return next(e)
     const beneath = await next(e)
     if (e.agent_id !== undefined || beneath.decision !== undefined) return beneath
     const input = (e.tool_input ?? {}) as Record<string, unknown>
@@ -3039,6 +3610,7 @@ export const register: Register = (on, options) => {
 
   // Why a turn died, as the app reports it, for the red line under the reply.
   on('classic.StopFailure', async ($, e, next) => {
+    if (isHeadless) return next(e)
     const result = await next(e)
     if (e.agent_id === undefined) lastFailure = failureOf(e.error, e.error_details)
     return result
@@ -3047,6 +3619,7 @@ export const register: Register = (on, options) => {
   // A turn that starts without a new prompt of yours (a hook sent Claude back
   // to work) carries on the same reply.
   on('turn.start', async ($, e, next) => {
+    if (isHeadless) return next(e)
     const result = await next(e)
     if (e.agentId === undefined) lastTurnStartAt = await $.clock.now()
     if (e.agentId === undefined) await stillWorking($)
@@ -3054,6 +3627,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.complete', async ($, e, next) => {
+    if (isHeadless) return next(e)
     const result = await next(e)
     // A helper's end ticks it off in the panel.
     if (e.agentId !== undefined) {
@@ -3085,6 +3659,7 @@ export const register: Register = (on, options) => {
   // place, and Bob vanishes for the rest of the turn while he goes on talking. So Claude asks in words, and Bob's
   // panel does the asking with its own buttons.
   on('prompt.compose', async ($, e, next) => {
+    if (isHeadless) return next(e)
     const composed = await next(e)
     const { isOn } = await read($, settings)
     if (!isOn) return composed

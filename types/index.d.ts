@@ -72,6 +72,8 @@ export type Reply = {
   shownCopy?: string
   // The copy-card names the panel tool handed over, when it did.
   copyNames?: string[]
+  // Why the full reply has to be read, when Claude said it does: the button then stands out.
+  mustRead?: string
 }
 
 export type Settings = {
@@ -79,19 +81,33 @@ export type Settings = {
   isVoiceOn: boolean
   isCardInPane: boolean
   isCompact: boolean
-  // Which voice speaks: mac (free, the default), normal or live (OpenAI). Set with /bob mac, normal or live.
-  voiceEngine?: 'mac' | 'normal' | 'live'
   // The OpenAI voice you picked with /bob voice <name>; empty for the default.
   voiceName?: string
   // How the live voice delivers: pro (brisk, articulate) or narrator (slower).
   voiceStyle?: string
   // Nudge for the highlight against the voice, in ms; negative is earlier.
   syncMs?: number
+  // Which voice speaks: mac (free, the default), normal or live (OpenAI). Set with /bob mac, normal or live.
+  voiceEngine?: 'mac' | 'normal' | 'live'
+  // The sounds (send, heartbeat, ding, done), muted apart from the voice; unset follows the voice, as before.
+  isSoundOn?: boolean
+  // The mic you talk into with 🎙: picked with /bob mic, or the last one that heard you.
+  micName?: string
+}
+
+// Talking to Claude with 🎙: the mic opening, listening until Done, writing out what you said; `draft` holds it when
+// the message box could not take it, for the panel's Send and Copy.
+export type MicState = {
+  phase: 'off' | 'starting' | 'listening' | 'writing'
+  device?: string
+  draft?: string
 }
 
 declare module 'claude-code' {
   interface PluginState {
     // owner: this chat's name on the shared voice lock, the same across reloads.
-    'bob-talks-back': { reply: Reply | null; settings: Settings; owner: string }
+    // muteMenu: the 🔊 chooser is open.
+    // mic: talking to Claude with 🎙.
+    'bob-talks-back': { reply: Reply | null; settings: Settings; owner: string; muteMenu: boolean; mic: MicState }
   }
 }

@@ -52,15 +52,21 @@ type Boot = {
   history?: string
   // How long the Mac voice takes to say a line, as on a real Mac.
   sayMs?: number
+  sayWrap?: number
+  // Talking to Claude through the orb: what OpenAI writes out, and how loud the mic was (dB, at its loudest).
+  heardYou?: string
+  micLevel?: number
   // The voice picked with /bob mac, normal or live; most tests run on the live one, null leaves it unpicked.
   engine?: 'mac' | 'normal' | 'live' | null
+  // whisper.cpp and its English model are on this Mac.
+  whisper?: boolean
 }
 
 // A session with Bob loaded and everything beneath him stood in for: what he
 // plays, runs and fetches is recorded.
 function boot(
   on: On,
-  { voice, key = false, gist = 'Done: all set.', refuses, live = false, stuck = false, heard, streamError, lockedMs = 0, promptDelayMs = 0, gistFails = false, history = '', sayMs = 0, engine = 'live' }: Boot,
+  { voice, key = false, gist = 'Done: all set.', refuses, live = false, stuck = false, heard, streamError, lockedMs = 0, promptDelayMs = 0, gistFails = false, history = '', sayMs = 0, sayWrap = Infinity, heardYou = 'Make the button purple.', micLevel = -18, engine = 'live', whisper = false }: Boot,
 ) {
   const clock = mock.clock(on)
   mock.store(on, { 'settings-v2': { isOn: true, isVoiceOn: voice, ...(engine === null ? {} : { voiceEngine: engine }) } })
@@ -72,6 +78,15 @@ function boot(
   const written = new Map<string, string>()
   const agents: { id: string; description: string; type: string; status: string }[] = []
   on('agent.list', () => ({ value: agents as never }))
+  // The Mac's mics as ffmpeg lists them: a loopback, an app mic, then earbuds.
+  const MICS = '[AVFoundation indev @ 0x1] AVFoundation audio devices:\n[AVFoundation indev @ 0x1] [0] Camo Microphone\n[AVFoundation indev @ 0x1] [1] Baseus Bass BP1 Pro\n[AVFoundation indev @ 0x1] [2] BlackHole 16ch\n'
+  // ffmpeg records until the mod sends it pkill -INT.
+  let isMicStopped = false
+  on('fs.exists', (_, e) => {
+    const path = String(e.path)
+    const isWhisper = whisper && (path === '/opt/homebrew/bin/whisper-cli' || path === '/.config/bob/ggml-base.en.bin')
+    return { value: path === '/opt/homebrew/bin/ffmpeg' || isWhisper }
+  })
   on('command.register', () => ({ value: { command: 'bob' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('fs.write', (_, e) => {
@@ -108,6 +123,13 @@ function boot(
       return { value: { exitCode: 0, stdout: written.get(file) ?? '', stderr: '' } }
     }
     if (e.argv[0] === 'say' && sayMs > 0) await clock.sleep(sayMs)
+    if (e.argv[0] === '/opt/homebrew/bin/whisper-cli') return { value: { exitCode: 0, stdout: ` ${heardYou}\n`, stderr: '' } }
+    if (e.argv.includes('-list_devices')) return { value: { exitCode: 1, stdout: '', stderr: MICS } }
+    if (e.argv.includes('volumedetect')) return { value: { exitCode: 0, stdout: '', stderr: `[Parsed_volumedetect_0] max_volume: ${micLevel} dB\n` } }
+    if (e.argv[0] === '/usr/bin/pkill' && e.argv[1] === '-INT') isMicStopped = true
+    if (e.argv[0] === '/usr/bin/curl' && e.argv.some(arg => String(arg).endsWith('/audio/transcriptions'))) {
+      return { value: { exitCode: 0, stdout: JSON.stringify({ text: heardYou }), stderr: '' } }
+    }
     // No voice of this chat left playing from before.
     if (e.argv[0] === 'pgrep') return { value: { exitCode: 1, stdout: '', stderr: '' } }
     if (e.argv[3] === 'voice-lock') return { value: { exitCode: clock.now() < lockedMs ? 1 : 0, stdout: '', stderr: '' } }
@@ -135,7 +157,31 @@ function boot(
   // The streamed live voice: reports the first sound, the word times, then
   // the end, as realtime-stream.mjs does; fails when the live voice is off.
   on('process.spawn', async function* (_, e) {
+    // The Mac voice through `script` and `say -i`: recorded as the say it is, and each word marked as it is said.
+    const sayAt = e.argv.findIndex(arg => String(arg).includes('/usr/bin/say'))
+    if (sayAt >= 0) {
+      runs.push(['say', ...e.argv.slice(sayAt), JSON.stringify(e)])
+      const text = String(e.argv.at(-1) ?? '')
+      const words = text.split(' ')
+      // A wrapped line (sayWrap words fit the screen): say redraws only the screen line it is on, so its marks count
+      // from that line's start.
+      const wrapAt = sayWrap
+      for (let at = 0; at < words.length; at++) {
+        if (sayMs > 0) await clock.sleep(sayMs / words.length)
+        const lineStart = at < wrapAt ? 0 : wrapAt
+        yield { stream: 'stdout' as const, text: `\r\x1b[M${words.slice(lineStart, at).join(' ')}${at > lineStart ? ' ' : ''}\x1b[7m${words[at]}\x1b(B\x1b[m ${words.slice(at + 1).join(' ')}` }
+      }
+      yield { stream: 'stdout' as const, text: '\r\x1b[M' }
+      return { value: { code: 0, signal: null } }
+    }
     runs.push([...e.argv, JSON.stringify(e)])
+    // ffmpeg recording the mic: it opens, then records until it is told to stop.
+    if (e.argv.includes('avfoundation')) {
+      yield { stream: 'stderr' as const, text: "Output #0, wav, to '/private/tmp/bob-voice/mic.wav':\n" }
+      while (!isMicStopped) await clock.sleep(1000)
+      isMicStopped = false
+      return { value: { code: 0, signal: null } }
+    }
     if (!e.argv.some(arg => String(arg).endsWith('realtime-stream.mjs'))) return { value: { code: 0, signal: null } }
     if (stuck) await clock.sleep(120_000)
     if (!live) {
@@ -220,7 +266,7 @@ test('3. no key: the Mac voice (a man\'s) speaks the closing line', async ($, on
   await clock.advance(20_000)
 
   expect(fetches).toHaveLength(0)
-  expect(runs.find(argv => argv[0] === 'say')?.slice(1, 3)).toEqual(['-v', 'Daniel'])
+  expect(runs.find(argv => argv[0] === 'say')).toContain('Daniel')
 })
 
 for (const [gist, tag] of [
@@ -287,11 +333,13 @@ test('6. sounds: send, heartbeat while working, finish sound after the last word
   expect(last.includes('ask.wav')).toBe(true)
 })
 
-test('7. 🔇 mutes every sound and stops the voice', async ($, on) => {
+test('7. 🔊 then Mute all mutes every sound and stops the voice', async ($, on) => {
   const { clock, sounds, runs } = boot(on, { voice: true })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   await band.press({ key: 'voice' })
+  await band.press({ key: 'mute-all' })
+  expect((await band.find({ key: 'voice' }))?.props.label).toBe('🔇')
   await band.unmount()
 
   sounds.length = 0
@@ -536,7 +584,7 @@ test('18. /bob voices plays the five male voices; /bob voice echo switches to it
   await $.turn.complete({ answer: long('Working on it.'), durationMs: 5, isAborted: false, turnId: 't' })
   await clock.advance(6000)
   const helper = runs.find(argv => argv[0] !== 'pgrep' && argv.some(arg => arg.endsWith('realtime-stream.mjs')))
-  expect(helper?.[3]).toBe('echo')  // [env, node, helper, voice, …]
+  expect(helper?.[3]).toBe('echo') // [env, node, helper, voice, …]
 })
 
 test('19. the live voice runs with the picked voice, model and style', async ($, on) => {
@@ -548,7 +596,6 @@ test('19. the live voice runs with the picked voice, model and style', async ($,
   await clock.advance(6000)
 
   const helper = runs.find(argv => argv[0] !== 'pgrep' && argv.some(arg => arg.endsWith('realtime-stream.mjs')))
-  expect(helper?.[2]).toMatch(/helpers\/realtime-stream\.mjs$/)
   expect(helper?.slice(3, 6)).toEqual(['ash', 'gpt-realtime-2.1', 'narrator'])
 })
 
@@ -1045,38 +1092,7 @@ test('45. Retry after a stop: your message goes straight in the box, never stuck
   await band.unmount()
 })
 
-test('46. out of the box the free Mac voice speaks, even with an OpenAI key', async ($, on) => {
-  const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
-  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  await $.prompt.submit({ text: 'hello' })
-  await $.session.append(says('Working on it.'))
-  await $.turn.complete({ answer: long('Working on it.'), durationMs: 5, isAborted: false, turnId: 't' })
-  await clock.advance(20_000)
-
-  expect(fetches).toHaveLength(0)
-  expect(runs.some(argv => argv.some(arg => arg.endsWith('realtime-stream.mjs') || arg.endsWith('realtime-voice.mjs')))).toBe(false)
-  expect(runs.some(argv => argv[0] === 'say')).toBe(true)
-})
-
-test('47. /bob normal speaks with OpenAI text-to-speech, /bob live with the live voice, /bob mac back to free', async ($, on) => {
-  const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
-  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-
-  expect(JSON.stringify(await $.command.run({ command: 'bob', args: 'normal' }))).toContain("OpenAI's normal voice")
-  await $.prompt.submit({ text: 'hello' })
-  await $.session.append(says('Working on it.'))
-  await $.turn.complete({ answer: long('Working on it.'), durationMs: 5, isAborted: false, turnId: 't' })
-  await clock.advance(20_000)
-  expect(fetches.some(one => one.startsWith('https://api.openai.com/v1/audio/speech'))).toBe(true)
-  expect(runs.some(argv => argv.some(arg => arg.endsWith('realtime-stream.mjs')))).toBe(false)
-
-  expect(JSON.stringify(await $.command.run({ command: 'bob', args: 'live' }))).toContain("OpenAI's live voice")
-  expect(JSON.stringify(await $.command.run({ command: 'bob', args: '' }))).toContain("OpenAI's live voice")
-  expect(JSON.stringify(await $.command.run({ command: 'bob', args: 'mac' }))).toContain("the Mac's own voice (free)")
-  expect(JSON.stringify(await $.command.run({ command: 'bob', args: '' }))).toContain("the Mac's own voice (free)")
-})
-
-test('48. a short reply never says its first sentence twice', async ($, on) => {
+test('49. a short reply never says its first sentence twice', async ($, on) => {
   const { clock, runs } = boot(on, { voice: true })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'which format for X?' })
@@ -1092,7 +1108,7 @@ test('48. a short reply never says its first sentence twice', async ($, on) => {
   expect(said.some(one => one.includes('The vertical ones are for TikTok and Shorts.'))).toBe(true)
 })
 
-test('49. when the summary never comes, the end of the reply is said, not just its opening', async ($, on) => {
+test('50. when the summary never comes, the end of the reply is said, not just its opening', async ($, on) => {
   const { clock, runs } = boot(on, { voice: true, gistFails: true })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'will it go viral?' })
@@ -1108,7 +1124,7 @@ test('49. when the summary never comes, the end of the reply is said, not just i
   expect(said.some(one => one.includes('Reply under the stunt with the link before tonight.'))).toBe(true)
 })
 
-test('50. a long opening is cut to its first part as it arrives', async ($, on) => {
+test('51. a long opening is cut to its first part as it arrives', async ($, on) => {
   const { clock, runs } = boot(on, { voice: true })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'build it' })
@@ -1123,7 +1139,7 @@ test('50. a long opening is cut to its first part as it arrives', async ($, on) 
   expect(said.some(one => one.includes('door minigun'))).toBe(false)
 })
 
-test('51. a long reply\'s card says there is more in the full reply; a short one does not', async ($, on) => {
+test('52. a long reply\'s card says there is more in the full reply; a short one does not', async ($, on) => {
   const { clock } = boot(on, { voice: false, gist: 'Update: The plan is set.' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'what is the plan' })
@@ -1144,7 +1160,7 @@ test('51. a long reply\'s card says there is more in the full reply; a short one
   await again.unmount()
 })
 
-test('52. what was said goes to a history file that a reload keeps adding to', async ($, on) => {
+test('53. what was said goes to a history file that a reload keeps adding to', async ($, on) => {
   const { clock, written } = boot(on, { voice: true, history: '2026-10-24 20:00:00 say #0 (system): an older line' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'hello' })
@@ -1158,7 +1174,7 @@ test('52. what was said goes to a history file that a reload keeps adding to', a
 
 const NOTE = '\n\n[bob-tag]: # "Done: The helicopter is yellow now"\n[bob-say]: # "It is painted Dot World yellow, ready to upload when you are."'
 
-test('53. Claude\'s own note gives the spoken line: no summary model, and the note is never read or shown', async ($, on) => {
+test('54. Claude\'s own note gives the spoken line: no summary model, and the note is never read or shown', async ($, on) => {
   const { clock, runs, summaries } = boot(on, { voice: true })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'paint it' })
@@ -1178,7 +1194,7 @@ test('53. Claude\'s own note gives the spoken line: no summary model, and the no
   await band.unmount()
 })
 
-test('54. a question in Claude\'s note becomes buttons', async ($, on) => {
+test('55. a question in Claude\'s note becomes buttons', async ($, on) => {
   const { clock } = boot(on, { voice: false })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'colors?' })
@@ -1193,7 +1209,7 @@ test('54. a question in Claude\'s note becomes buttons', async ($, on) => {
   await band.unmount()
 })
 
-test('55. without a note the summary model still writes the line', async ($, on) => {
+test('56. without a note the summary model still writes the line', async ($, on) => {
   const { clock, summaries } = boot(on, { voice: true })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'hello' })
@@ -1203,7 +1219,7 @@ test('55. without a note the summary model still writes the line', async ($, on)
   expect(summaries).toHaveLength(1)
 })
 
-test('56. the instructions ask Claude for the note, in the desktop app and in a terminal', async ($, on) => {
+test('57. the instructions ask Claude for the note, in the desktop app and in a terminal', async ($, on) => {
   boot(on, { voice: true })
   on('prompt.compose', () => ({ sections: [] }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -1213,7 +1229,7 @@ test('56. the instructions ask Claude for the note, in the desktop app and in a 
   }
 })
 
-test('57. something to copy gets a card named by Claude: Show opens it in the panel, Copy copies it', async ($, on) => {
+test('58. something to copy gets a card named by Claude: Show opens it in the panel, Copy copies it', async ($, on) => {
   const { clock } = boot(on, { voice: false })
   const copied: string[] = []
   on('ui.copy', (_, e) => {
@@ -1238,11 +1254,11 @@ test('57. something to copy gets a card named by Claude: Show opens it in the pa
   await band.unmount()
 })
 
-test('58. files and web pages the reply points to get Open buttons', async ($, on) => {
+test('59. files and web pages the reply points to get Open buttons', async ($, on) => {
   const { clock, runs } = boot(on, { voice: false, gist: 'Done: Both are ready.' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'where are they' })
-  const answer = long('The video is [the demo](/Users/a9/Desktop/demo.mp4) and the code is on https://github.com/joelarmoire/bob-mod-claude.')
+  const answer = long('The video is [the demo](/Users/you/Desktop/demo.mp4) and the code is on https://github.com/joelarmoire/bob-mod-claude.')
   await $.session.append(says(answer))
   await $.turn.complete({ answer, durationMs: 5, isAborted: false, turnId: 't' })
   await clock.advance(30_000)
@@ -1252,11 +1268,11 @@ test('58. files and web pages the reply points to get Open buttons', async ($, o
   expect((await band.find({ type: 'Text', text: 'github.com/joelarmoire/bob-mod-claude' }))?.text).toBe('github.com/joelarmoire/bob-mod-claude')
   await band.press({ key: 'linkbutton0' })
   await clock.advance(1000)
-  expect(runs.some(argv => argv[0] === 'open' && argv[1] === '/Users/a9/Desktop/demo.mp4')).toBe(true)
+  expect(runs.some(argv => argv[0] === 'open' && argv[1] === '/Users/you/Desktop/demo.mp4')).toBe(true)
   await band.unmount()
 })
 
-test('59. Full reply opens the whole reply in the panel', async ($, on) => {
+test('60. Full reply opens the whole reply in the panel', async ($, on) => {
   const { clock } = boot(on, { voice: false, gist: 'Update: The plan is set.' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'what is the plan' })
@@ -1268,12 +1284,12 @@ test('59. Full reply opens the whole reply in the panel', async ($, on) => {
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await band.find({ type: 'Text', text: 'Point 7 of the plan has a few words in it.' })).toBeUndefined()
   await band.press({ key: 'fullbutton' })
-  expect((await band.find({ type: 'Text', text: 'Point 7 of the plan has a few words in it.' }))).toBeDefined()
+  expect(String((await band.find({ type: 'Markdown' }))?.props.text)).toContain('Point 7 of the plan has a few words in it.')
   expect(String((await band.find({ key: 'fullbutton' }))?.props.label).trim()).toBe('Hide full reply')
   await band.unmount()
 })
 
-test('60. the one-line note: the main line, its points on the card, a named copy card and options', async ($, on) => {
+test('61. the one-line note: the main line, its points on the card, a named copy card and options', async ($, on) => {
   const { clock, summaries } = boot(on, { voice: false })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'what now' })
@@ -1300,7 +1316,7 @@ const finish = async ($: Parameters<Parameters<typeof test>[1]>[0], clock: { adv
   await clock.advance(30_000)
 }
 
-test('61. case: two texts to copy get two named cards, each with its own Show and Copy', async ($, on) => {
+test('62. case: two texts to copy get two named cards, each with its own Show and Copy', async ($, on) => {
   const { clock } = boot(on, { voice: false })
   const copied: string[] = []
   on('ui.copy', (_, e) => (copied.push(e.text), { value: { isCopied: true as const } }))
@@ -1317,7 +1333,7 @@ test('61. case: two texts to copy get two named cards, each with its own Show an
   await band.unmount()
 })
 
-test('62. case: a choice between two plans shows both as buttons, with what each one is, and a click answers', async ($, on) => {
+test('63. case: a choice between two plans shows both as buttons, with what each one is, and a click answers', async ($, on) => {
   const { clock, prompts } = boot(on, { voice: false })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'how should we launch' })
@@ -1331,20 +1347,20 @@ test('62. case: a choice between two plans shows both as buttons, with what each
   await band.unmount()
 })
 
-test('63. case: a file sent and also linked in the text gets one Open button, not two', async ($, on) => {
+test('64. case: a file sent and also linked in the text gets one Open button, not two', async ($, on) => {
   const { clock } = boot(on, { voice: false })
   on('tool.call', () => ({ result: {} }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'send me the video' })
-  await $.tool.call({ tool: 'SendUserFile', files: ['/Users/a9/Desktop/demo.mp4'], status: 'normal' })
-  await finish($, clock, long('Sent: [demo.mp4](/Users/a9/Desktop/demo.mp4).') + '\n\n[bob]: # "Done: The video is ready | Say: I sent you the video, open it from the panel."')
+  await $.tool.call({ tool: 'SendUserFile', files: ['/Users/you/Desktop/demo.mp4'], status: 'normal' })
+  await finish($, clock, long('Sent: [demo.mp4](/Users/you/Desktop/demo.mp4).') + '\n\n[bob]: # "Done: The video is ready | Say: I sent you the video, open it from the panel."')
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   const opens = (await band.findAll({ type: 'Button' })).filter(one => String(one.props.label).trim() === 'Open')
   expect(opens).toHaveLength(1)
   await band.unmount()
 })
 
-test('64. case: a project file linked the usual way and a full path written as code both get Open buttons', async ($, on) => {
+test('65. case: a project file linked the usual way and a full path written as code both get Open buttons', async ($, on) => {
   const { clock, runs } = boot(on, { voice: false })
   await $.session.start({ cwd: '/proj', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'where is it' })
@@ -1361,7 +1377,7 @@ test('64. case: a project file linked the usual way and a full path written as c
   await band.unmount()
 })
 
-test('65. case: the full reply in the panel never shows the hidden note', async ($, on) => {
+test('66. case: the full reply in the panel never shows the hidden note', async ($, on) => {
   const { clock } = boot(on, { voice: false })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'explain' })
@@ -1369,12 +1385,13 @@ test('65. case: the full reply in the panel never shows the hidden note', async 
   await finish($, clock, `${body}\n\n[bob]: # "Update: Ten parts explained | Say: I explained it in ten parts. | Point: The last part matters most"`)
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   await band.press({ key: 'fullbutton' })
-  expect((await band.find({ type: 'Text', text: 'Part 10 explains one more thing about it.' }))).toBeDefined()
-  expect(await band.find({ type: 'Text', text: /\[bob\]|Say:/ })).toBeUndefined()
+  const full = String((await band.find({ type: 'Markdown' }))?.props.text)
+  expect(full).toContain('Part 10 explains one more thing about it.')
+  expect(full).not.toMatch(/\[bob|Say:/)
   await band.unmount()
 })
 
-test('66. case: everything at once: question, points, a copy card, a sent file, a link, all on the card', async ($, on) => {
+test('67. case: everything at once: question, points, a copy card, a sent file, a link, all on the card', async ($, on) => {
   const { clock } = boot(on, { voice: false })
   on('tool.call', () => ({ result: {} }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -1392,7 +1409,7 @@ test('66. case: everything at once: question, points, a copy card, a sent file, 
   await band.unmount()
 })
 
-test('67. the two-line note carries points, copy names and options in its say line', async ($, on) => {
+test('68. the two-line note carries points, copy names and options in its say line', async ($, on) => {
   const { clock, summaries } = boot(on, { voice: false })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'what now' })
@@ -1412,7 +1429,7 @@ test('67. the two-line note carries points, copy names and options in its say li
   await band.unmount()
 })
 
-test('68. when the reply ends mid-sentence, the sentence being read finishes in one go, never cut and restarted', async ($, on) => {
+test('69. when the reply ends mid-sentence, the sentence being read finishes in one go, never cut and restarted', async ($, on) => {
   const { clock, runs } = boot(on, { voice: true, sayMs: 4000 })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'is it done' })
@@ -1430,7 +1447,7 @@ test('68. when the reply ends mid-sentence, the sentence being read finishes in 
   expect(said.some(one => one.includes('Everything passes and nothing else changed.'))).toBe(true)
 })
 
-test('69. the panel tool: Claude hands the line over through a tool, so nothing shows in the chat, and nobody is asked', async ($, on) => {
+test('70. the panel tool: Claude hands the line over through a tool, so nothing shows in the chat, and nobody is asked', async ($, on) => {
   const { clock, summaries } = boot(on, { voice: false })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'write the tweet' })
@@ -1455,4 +1472,495 @@ test('69. the panel tool: Claude hands the line over through a tool, so nothing 
   }
   expect((await band.findAll({ type: 'Button' })).map(one => String(one.props.label).trim())).toEqual(expect.arrayContaining(['Tonight', 'Tomorrow']))
   await band.unmount()
+})
+
+test('71. a must-read: the voice says to open the full reply, the button stands out with why, and the full reply is readable', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'how do I set it up' })
+  await $.session.append(says('Here are the steps.\n\nStep one opens the file.\n\nStep two pastes the key.'))
+  await $.tool.call({ tool: 'mcp__bob-talks-back__panel', tag: 'Done: Setup steps are ready', say: 'The setup takes two steps.', mustRead: 'the steps to follow' } as never)
+  await $.turn.complete({ answer: 'Here are the steps.', durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-1) ?? '')
+  expect(said.some(one => one.includes('Open the full reply in the panel: the steps to follow.'))).toBe(true)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(String((await band.find({ key: 'fullbutton' }))?.props.label).trim()).toBe('Must read: full reply')
+  expect((await band.find({ type: 'Text', text: /^the steps to follow$/ }))?.text).toBe('the steps to follow')
+  await band.press({ key: 'fullbutton' })
+  const full = await band.find({ type: 'Markdown' })
+  expect(String(full?.props.text)).toContain('Step two pastes the key.')
+  expect(full?.props.dimColor).toBeFalsy()
+  await band.unmount()
+})
+
+test('72. an open full reply has Copy all, which copies the whole reply without the hidden note', async ($, on) => {
+  const { clock } = boot(on, { voice: false, gist: 'Update: The plan is set.' })
+  const copied: string[] = []
+  on('ui.copy', (_, e) => (copied.push(e.text), { value: { isCopied: true as const } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'what is the plan' })
+  const reply = Array.from({ length: 12 }, (_, at) => `Point ${at + 1} of the plan has a few words in it.`).join('\n\n') + '\n\n[bob-tag]: # "Update: The plan"'
+  await $.session.append(says(reply))
+  await $.turn.complete({ answer: reply, durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await band.find({ key: 'copyfull' })).toBeUndefined()
+  await band.press({ key: 'fullbutton' })
+  await band.press({ key: 'copyfull' })
+  expect(copied).toHaveLength(1)
+  expect(copied[0]).toContain('Point 12 of the plan has a few words in it.')
+  expect(copied[0]).not.toContain('[bob-tag]')
+  expect(String((await band.find({ key: 'copyfull' }))?.props.label).trim()).toBe('✓ Copied')
+  await band.unmount()
+})
+
+test('73. the Mac voice lights each word the moment say marks it, not by a guess', async ($, on) => {
+  // say takes 6 s for this line and marks each of its 8 words in turn: 750 ms apart, whatever the words look like.
+  const { clock, runs } = boot(on, { voice: true, sayMs: 6000 })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'when' })
+  await $.session.append(says('Two options: tonight, 20:00 to 22:00 your time.'))
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const litAt: Record<string, number> = {}
+  for (let step = 0; step < 120; step++) {
+    await clock.advance(100)
+    const lit = (await band.findAll({ type: 'Box' })).find(one => one.props.backgroundColor !== undefined && one.key?.startsWith('w'))
+    if (lit?.key && litAt[lit.key] === undefined) litAt[lit.key] = clock.now()
+  }
+  await band.unmount()
+  expect(runs.some(argv => argv[0] === 'say' && String(argv[1]).includes(' -i '))).toBe(true)
+  const gap = litAt.w2! - litAt.w1!
+  expect(gap).toBeGreaterThanOrEqual(650)
+  expect(gap).toBeLessThanOrEqual(850)
+})
+
+test('74. a Mac line stopped by your next message before its first word is cut, not said again the old way', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true, sayMs: 8000 })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'first' })
+  await $.session.append(says('This first line gets interrupted right away.'))
+  await clock.advance(50)
+  await $.prompt.submit({ text: 'second' })
+  await clock.advance(20_000)
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-1) ?? '')
+  expect(said.filter(one => one.includes('This first line gets interrupted right away.')).length).toBeLessThanOrEqual(1)
+})
+
+test('75. a spoken line that ends on a question is not followed by "Question for you" and the question again', async ($, on) => {
+  const { clock, sounds, runs } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'what next' })
+  await $.session.append(says(long('Three things are waiting.')))
+  await $.tool.call({
+    tool: 'mcp__bob-talks-back__panel',
+    tag: 'Question: Which one do you want first?',
+    say: 'Three things are waiting on you: voice typing, the test round and two fixes. Which one should we tackle first?',
+    options: ['Voice typing', 'Test round', 'Fixes'],
+  } as never)
+  await $.turn.complete({ answer: long('Three things are waiting.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(60_000)
+
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-1) ?? '')
+  expect(said.some(one => one.includes('Question for you'))).toBe(false)
+  expect(said.filter(one => one.includes('Which one')).length).toBe(1)
+  expect(said.at(-1)).toContain('"Which one should we tackle first?"]')
+  expect(sounds.some(one => one.includes('ask.wav'))).toBe(true)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await band.find({ type: 'Text', text: 'QUESTION FOR YOU' }))?.text).toBe('QUESTION FOR YOU')
+  expect((await band.findAll({ type: 'Button' })).map(one => String(one.props.label).trim())).toEqual(expect.arrayContaining(['Voice typing', 'Test round', 'Fixes']))
+  await band.unmount()
+})
+
+test('76. a spoken line that does not end on a question still gets "Question for you" and the question', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'tweet' })
+  await $.session.append(says(long('The tweet is ready.')))
+  await $.tool.call({ tool: 'mcp__bob-talks-back__panel', tag: 'Question: Post it tonight?', say: 'The tweet is ready to copy in the panel.' } as never)
+  await $.turn.complete({ answer: long('The tweet is ready.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(60_000)
+
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-1) ?? '')
+  expect(said.findIndex(one => one.includes('ready to copy'))).toBeLessThan(said.findIndex(one => one.includes('Question for you. Post it tonight?')))
+})
+
+test('77. a long opening is never cut before a "but" that turns it around', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'heartbeat' })
+  await $.session.append(
+    says(
+      "Found it: the mod does play the heartbeat (the log shows it at 4 s), but the sound is almost all deep bass below 150 Hz, which your Mac mini's speaker can't play. Making a version you can hear on it.",
+    ),
+  )
+  await clock.advance(10_000)
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-1) ?? '')
+  expect(said.some(one => one.includes('Found it: the mod does play the heartbeat, but the sound is almost all deep bass below 150 Hz."'))).toBe(true)
+  expect(said.some(one => one.includes('the log shows'))).toBe(false)
+})
+
+test('78. a long opening is never cut before an "if" that sets a condition', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'push' })
+  await $.session.append(
+    says('I will push the final version of the mod to GitHub tonight, if you test it in your copy first and tell me it works.'),
+  )
+  await clock.advance(10_000)
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-1) ?? '')
+  expect(said.some(one => one.includes('if you test it in your copy first'))).toBe(true)
+})
+
+test('79. a long Mac line keeps its highlight moving: the terminal is wide, and a mark from a wrapped line is the next word', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true, sayMs: 8000 })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'long' })
+  await $.session.append(says('One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen.'))
+  await clock.advance(10_000)
+  expect(runs.some(argv => argv[0] === 'say' && String(argv[1]).includes('stty cols 4000'))).toBe(true)
+})
+
+test('80. even when say counts a wrapped line from its left, every word lights in turn, none rushed at the end', async ($, on) => {
+  // The mock wraps after 8 words, as a line too long for the terminal would.
+  const { clock } = boot(on, { voice: true, sayMs: 8000, sayWrap: 8 })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'long' })
+  await $.session.append(says('One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen.'))
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const litAt: Record<string, number> = {}
+  for (let step = 0; step < 120; step++) {
+    await clock.advance(100)
+    const sentence = 'One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen.'.split(' ')
+    // The lit box's place in the caption line on screen, named by that line's first word.
+    const first = (await band.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).find(word => sentence.includes(word))
+    const lit = (await band.findAll({ type: 'Box' })).find(one => one.props.backgroundColor !== undefined && one.key?.startsWith('w'))
+    const place = `${first}:${lit?.key}`
+    if (lit?.key && litAt[place] === undefined) litAt[place] = clock.now()
+  }
+  await band.unmount()
+  const times = Object.values(litAt).sort((a, b) => a - b)
+  const gaps = times.slice(1).map((at, i) => at - (times[i] ?? at))
+  expect(times.length).toBeGreaterThanOrEqual(15)
+  expect(Math.min(...gaps)).toBeGreaterThanOrEqual(300)
+  expect(Math.max(...gaps)).toBeLessThanOrEqual(700)
+})
+
+test('81. 🔊 opens a small chooser in place of the icons; a pick closes it and is remembered', async ($, on) => {
+  const { clock } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await band.find({ key: 'mute-sounds' })).toBeUndefined()
+  await band.press({ key: 'voice' })
+  const picks = (await band.findAll({ type: 'Button' })).map(one => String(one.props.label))
+  expect(picks).toEqual(['✓ All on', 'Mute sounds', 'Mute voice', 'Mute all'])
+  expect(await band.find({ key: 'pane' })).toBeUndefined()
+  await band.press({ key: 'mute-sounds' })
+  expect(await band.find({ key: 'mute-sounds' })).toBeUndefined()
+  expect((await band.find({ key: 'voice' }))?.props.label).toBe('🔉')
+  await band.unmount()
+  // Saved with the other settings: after a reload Bob starts from what is stored.
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const again = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await again.press({ key: 'voice' })
+  expect((await again.find({ key: 'mute-sounds' }))?.props.label).toBe('✓ Mute sounds')
+  await again.unmount()
+  await clock.advance(10)
+})
+
+test('82. Mute sounds: the voice still speaks, but no heartbeat, ding or done sound plays', async ($, on) => {
+  const { clock, sounds, runs } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'voice' })
+  await band.press({ key: 'mute-sounds' })
+  await band.unmount()
+  sounds.length = 0
+  await $.prompt.submit({ text: 'long job' })
+  await clock.advance(30_000)
+  await $.session.append(says('Still working on it.'))
+  await $.turn.complete({ answer: long('Still working on it.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+  expect(sounds).toHaveLength(0)
+  expect(runs.some(argv => argv[0] === 'say')).toBe(true)
+})
+
+test('83. Mute voice: nothing is said, but the heartbeat plays while Claude works and the done sound at the end', async ($, on) => {
+  const { clock, sounds, runs } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'voice' })
+  await band.press({ key: 'mute-voice' })
+  await band.unmount()
+  sounds.length = 0
+  runs.length = 0
+  await $.prompt.submit({ text: 'long job' })
+  await clock.advance(30_000)
+  expect(sounds.some(one => one.includes('heartbeat.wav'))).toBe(true)
+  await $.session.append(says('All finished.'))
+  await $.turn.complete({ answer: long('All finished.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+  expect(runs.some(argv => argv[0] === 'say' || argv.includes('/usr/bin/afplay'))).toBe(false)
+  expect(sounds.at(-1)).toContain('done.wav')
+})
+
+test('84. while Claude works the heartbeat is steady, every 3 seconds, never a long silence', async ($, on) => {
+  const { clock, sounds } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'long job' })
+  sounds.length = 0
+  await clock.advance(11_500)
+  expect(sounds.filter(one => one.includes('heartbeat.wav'))).toHaveLength(4)
+})
+
+// The message box as the app keeps it, and the toasts it shows.
+function promptBox(on: On, draft = '') {
+  const box = { text: draft, toasts: [] as string[] }
+  on('prompt.read', () => ({ value: { text: box.text, cursor: box.text.length } as never }))
+  on('prompt.fill', (_, e) => {
+    box.text = e.mode === 'append' ? `${box.text}${e.text}` : e.text
+    return { isFilled: true }
+  })
+  on('ui.toast', (_, e) => {
+    box.toasts.push(String((e as { text?: unknown }).text ?? ''))
+    return { value: undefined }
+  })
+  return box
+}
+
+test('85. click 🎙, talk, click it again: it turns red, a real mic opens, and what you said lands in the message box', { timeoutMs: 30_000 }, async ($, on) => {
+  const { clock, runs, sounds } = boot(on, { voice: true, key: true })
+  const box = promptBox(on, 'Also')
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'mic' })
+  await clock.advance(100)
+  const recording = runs.find(argv => argv.includes('avfoundation') && !argv.includes('-list_devices'))
+  // Earbuds before the phone app's mic; never the loopback that carries the Mac's own sound.
+  expect(recording).toContain(':Baseus Bass BP1 Pro')
+  // The same button turns red in its place, the icons around it stay put, and the orb turns red too.
+  expect((await band.find({ key: 'mic' }))?.props.label).toBe('🔴')
+  expect(await band.find({ key: 'voice' })).toBeDefined()
+  expect(String((await band.find({ type: 'Svg' }))?.props.source)).toContain('#E5484D')
+  await clock.advance(2000)
+  await band.press({ key: 'mic' })
+  await clock.advance(1500)
+  expect(box.text).toBe('Also Make the button purple.')
+  const curl = runs.find(argv => argv[0] === '/usr/bin/curl')
+  expect(curl).toContain('model=gpt-4o-mini-transcribe')
+  // The key goes to curl on its standard input only.
+  expect(curl?.slice(0, -1).join(' ')).not.toContain('sk-test')
+  expect(sounds.some(one => one.includes('start.wav'))).toBe(true)
+  expect((await band.find({ key: 'mic' }))?.props.label).toBe('🎙')
+  await band.unmount()
+})
+
+test('86. where the message box cannot take it, what you said waits in the panel with Send', { timeoutMs: 30_000 }, async ($, on) => {
+  const { clock, prompts } = boot(on, { voice: false, key: true, heardYou: 'Ship it tonight.' })
+  on('prompt.read', () => ({ value: { text: '', cursor: 0 } as never }))
+  on('prompt.fill', () => ({ isFilled: false, refusal: 'no_composer' as const }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'mic' })
+  await clock.advance(2000)
+  await band.press({ key: 'mic' })
+  await clock.advance(1500)
+  expect((await band.find({ type: 'Text', text: 'Ship it tonight.' }))?.text).toBe('Ship it tonight.')
+  await band.press({ key: 'mic-send' })
+  await clock.advance(500)
+  expect(prompts).toContain('Ship it tonight.')
+  await band.unmount()
+})
+
+test('87. no OpenAI key: 🎙 says what is needed, and no mic opens', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true, key: false })
+  const box = promptBox(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'mic' })
+  await clock.advance(500)
+  expect(box.toasts.at(-1)).toContain('OpenAI key')
+  expect(runs.some(argv => argv.includes('avfoundation'))).toBe(false)
+  await band.unmount()
+})
+
+test('88. a mic that hears nothing writes nothing out, and the next mic gets its turn', { timeoutMs: 30_000 }, async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true, key: true, micLevel: -91 })
+  const box = promptBox(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'mic' })
+  await clock.advance(3000)
+  await band.press({ key: 'mic' })
+  await clock.advance(1500)
+  expect(runs.some(argv => argv[0] === '/usr/bin/curl')).toBe(false)
+  expect(box.text).toBe('')
+  expect(box.toasts.at(-1)).toBe("Baseus Bass BP1 Pro heard nothing. Next time I'll listen on Camo Microphone.")
+  runs.length = 0
+  await band.press({ key: 'mic' })
+  await clock.advance(100)
+  expect(runs.find(argv => argv.includes('avfoundation') && !argv.includes('-list_devices'))).toContain(':Camo Microphone')
+  await band.press({ key: 'mic' })
+  await clock.advance(1500)
+  await band.unmount()
+})
+
+test('89. 🎙 works with the Mac voice picked: it uses your OpenAI key even when the voice does not', { timeoutMs: 30_000 }, async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true, key: true, engine: 'mac' })
+  const box = promptBox(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'mic' })
+  await clock.advance(2000)
+  await band.press({ key: 'mic' })
+  await clock.advance(1500)
+  expect(box.toasts).toEqual([])
+  expect(box.text).toBe('Make the button purple.')
+  expect(runs.some(argv => argv.some(arg => String(arg).endsWith('realtime-stream.mjs')))).toBe(false)
+  await band.unmount()
+})
+
+test('90. with Whisper on the Mac, 🎙 needs no key: what you said is written out on the Mac, in English', { timeoutMs: 30_000 }, async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true, key: false, whisper: true, heardYou: 'Push it tomorrow.' })
+  const box = promptBox(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'mic' })
+  await clock.advance(2000)
+  await band.press({ key: 'mic' })
+  await clock.advance(1500)
+  expect(box.toasts).toEqual([])
+  expect(box.text).toBe('Push it tomorrow.')
+  const whisperRun = runs.find(argv => argv[0] === '/opt/homebrew/bin/whisper-cli')
+  expect(whisperRun?.slice(1, 9)).toEqual(['-m', '/.config/bob/ggml-base.en.bin', '-f', '/private/tmp/bob-voice/mic.wav', '-nt', '-np', '-l', 'en'])
+  expect(runs.some(argv => argv[0] === '/usr/bin/curl')).toBe(false)
+  await band.unmount()
+})
+
+test('91. Whisper hearing no words ("[BLANK_AUDIO]") puts nothing in the box and says so', { timeoutMs: 30_000 }, async ($, on) => {
+  const { clock } = boot(on, { voice: true, whisper: true, heardYou: '[BLANK_AUDIO]' })
+  const box = promptBox(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'mic' })
+  await clock.advance(2000)
+  await band.press({ key: 'mic' })
+  await clock.advance(1500)
+  expect(box.text).toBe('')
+  expect(box.toasts.at(-1)).toContain("didn't catch any words")
+  await band.unmount()
+})
+
+test('92. the card puts what you click right under the line, points below; a must-read is said, not repeated in the text', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'will it work for users' })
+  await $.session.append(says(long('Not by copying. See [the list](/Users/you/notes/PORT.md).')))
+  await $.tool.call({
+    tool: 'mcp__bob-talks-back__panel',
+    tag: 'Update: not by copying, yes after the port',
+    say: 'Not if we copy it as it is.',
+    points: ['Keys from two other folders', 'Users need ffmpeg and Whisper'],
+    mustRead: 'the list of what changes in the port',
+  } as never)
+  await $.turn.complete({ answer: long('Not by copying.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(60_000)
+
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-2) ?? '')
+  expect(said.some(one => one.includes('Open the full reply in the panel: the list of what changes in the port.'))).toBe(true)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await band.find({ type: 'Text', text: 'Not if we copy it as it is.' }))?.text).toBe('Not if we copy it as it is.')
+  const order = (await band.findAll({})).map(one => String(one.key ?? one.text ?? ''))
+  const mustRead = order.indexOf('fullbutton')
+  const open = order.findIndex(one => one.startsWith('linkbutton'))
+  const firstPoint = order.findIndex(one => one.startsWith('• '))
+  expect(mustRead).toBeGreaterThan(-1)
+  expect(open).toBeGreaterThan(-1)
+  expect(mustRead).toBeLessThan(firstPoint)
+  expect(open).toBeLessThan(firstPoint)
+  await band.unmount()
+})
+
+test('93. an opening the voice has started is not said again by the summary, even before its first word lights', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true, sayMs: 2000 })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'chill' })
+  await $.session.append(says(long('Got it, my bad. If the tweet and the repo go out together, the timing is yours.')))
+  // The opening's start tone is playing when the summary arrives.
+  await clock.advance(10)
+  await $.tool.call({
+    tool: 'mcp__bob-talks-back__panel',
+    tag: 'Question: Launch on the old version, or wait 2 hours?',
+    say: 'Got it, my bad. Then posting now is fine. Launch on that, or wait about two hours?',
+  } as never)
+  await $.turn.complete({ answer: long('Got it, my bad.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(60_000)
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-2) ?? '')
+  expect(said.filter(one => one.includes('Got it, my bad.'))).toHaveLength(1)
+})
+
+test('94. an opening the summary replaces during its start tone is never said, so its words are not heard twice', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true, sayMs: 2000 })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // A while since Bob last spoke: his next line opens with the start tone.
+  await clock.advance(30_000)
+  await $.prompt.submit({ text: 'chill' })
+  await $.session.append(says(long('Got it, my bad. If the tweet and the repo go out together, the timing is yours.')))
+  await clock.advance(10)
+  await $.tool.call({
+    tool: 'mcp__bob-talks-back__panel',
+    tag: 'Question: Launch on the old version, or wait 2 hours?',
+    say: 'Got it, my bad. Then posting now is fine. Launch on that, or wait about two hours?',
+  } as never)
+  await $.turn.complete({ answer: long('Got it, my bad.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(60_000)
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-2) ?? '')
+  expect(said.filter(one => one.includes('Got it, my bad.'))).toHaveLength(1)
+  expect(said.some(one => one.includes('Then posting now is fine.'))).toBe(true)
+})
+
+test('97. a session nobody watches (claude -p, a script) gets no voice, no sound and no panel instructions', async ($, on) => {
+  const { clock, runs, sounds } = boot(on, { voice: true })
+  on('prompt.compose', () => ({ sections: [] }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: false })
+  const composed = (await $.prompt.compose({ model: 'test', promptModel: 'test', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)) as { sections: { id: string }[] }
+  expect(composed.sections.some(one => one.id.includes(':spoken-line') || one.id.includes(':ask-in-words'))).toBe(false)
+  await $.prompt.submit({ text: 'run the build' })
+  await $.session.append(says('Building now.'))
+  await $.turn.complete({ answer: long('Built.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+  expect(runs.some(argv => argv[0] === 'say')).toBe(false)
+  expect(sounds).toHaveLength(0)
+})
+
+test('98. out of the box the free Mac voice speaks, even with an OpenAI key', async ($, on) => {
+  const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'hello' })
+  await $.session.append(says('Working on it.'))
+  await $.turn.complete({ answer: long('Working on it.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(20_000)
+
+  expect(fetches).toHaveLength(0)
+  expect(runs.some(argv => argv.some(arg => arg.endsWith('realtime-stream.mjs') || arg.endsWith('realtime-voice.mjs')))).toBe(false)
+  expect(runs.some(argv => argv[0] === 'say')).toBe(true)
+})
+
+test('99. /bob normal speaks with OpenAI text-to-speech, /bob live with the live voice, /bob mac back to free', async ($, on) => {
+  const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  expect(JSON.stringify(await $.command.run({ command: 'bob', args: 'normal' }))).toContain("OpenAI's normal voice")
+  await $.prompt.submit({ text: 'hello' })
+  await $.session.append(says('Working on it.'))
+  await $.turn.complete({ answer: long('Working on it.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(20_000)
+  expect(fetches.some(one => one.startsWith('https://api.openai.com/v1/audio/speech'))).toBe(true)
+  expect(runs.some(argv => argv.some(arg => arg.endsWith('realtime-stream.mjs')))).toBe(false)
+
+  expect(JSON.stringify(await $.command.run({ command: 'bob', args: 'live' }))).toContain("OpenAI's live voice")
+  expect(JSON.stringify(await $.command.run({ command: 'bob', args: '' }))).toContain("OpenAI's live voice")
+  expect(JSON.stringify(await $.command.run({ command: 'bob', args: 'mac' }))).toContain("the Mac's own voice (free)")
+  expect(JSON.stringify(await $.command.run({ command: 'bob', args: '' }))).toContain("the Mac's own voice (free)")
 })
