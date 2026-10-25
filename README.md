@@ -2,7 +2,7 @@
 
 **Claude talks back.** A mod for the Claude desktop app (Code tab). It says each reply out loud in a few words and shows it as big captions, with the spoken word highlighted. You glance, you hear the gist, you keep working. The full reply is still in the chat when you want it.
 
-**Install in one step:** copy this, send it to Claude (the desktop app's Code tab, or Claude Code in a terminal), and allow the command when it asks. (In auto mode, Claude's safety check may ask you to run the command yourself: it shows it, and you type it after `!`.)
+**Install in one step:** copy this, send it to Claude (the desktop app's Code tab, or Claude Code in a terminal), and allow the command when it asks. (In auto mode, Claude's safety check may refuse to install code from GitHub. Then send the prompt again in manual mode, or install it from the app: **+** next to the prompt box, **Plugins**, **Add marketplace** `joelarmoire/bob-mod-claude`, **Add plugin**.)
 
 ```text
 Install the Claude mod bob-talks-back for me. Run:
@@ -42,7 +42,7 @@ https://github.com/user-attachments/assets/7d6c1697-c564-4a9c-ba90-70a0a1e5eb8b
 - **Speaks the point, not the wall of text.** Claude writes its own one or two spoken lines for each reply and hands them to the mod's panel tool, so nothing extra shows in the chat and the line comes from the Claude that knows your conversation. Short replies are said word for word, and a question is asked once, never repeated.
 - **Captions, one phrase at a time,** with the word being spoken lit up exactly as the voice says it, the Mac's voice included.
 - **Clear states:** working, QUESTION FOR YOU, NEEDS YOU and DONE, each with its own tag and sound, and a soft heartbeat every few seconds while Claude works.
-- **Nothing stays hidden in the chat.** What you click comes first on the card, right under the line: answer buttons, **Open** for files and pages, **Copy** cards named by Claude (with **Show**), and **Full reply**, which opens the whole reply right in the panel with **Copy all**. Up to 3 short points follow. When the reply truly has to be read (steps to follow, a long list), the voice says so and an orange **Must read** button says why.
+- **Nothing stays hidden in the chat, and nothing to click hides off the panel.** On the finished card, the answer buttons come right under the question; under the orb, each thing to copy shows its own first words above its **Copy** button and each file or page its name above **Open** (with **+N more** when they don't all fit); **Full reply** sits at the bottom right. When the reply truly has to be read (steps to follow, a long list), the voice says so and the button becomes **! Must read** in an orange frame. Full reply opens the whole reply in the side panel on the right, with **Copy all** and every Copy and Open. The card is sized to the panel: on a crowded one, the points step aside first, then the text is cut with "…", and all of it is still said out loud and in Full reply.
 - **Answer from the panel.** Questions show as buttons. Permission prompts get Allow and Deny. Plans get Approve and Keep planning.
 - **Talk to Claude with 🎙.** Click it (it turns 🔴 and the orb turns red), talk, click it again: what you said lands in the message box for you to send. It's written out on your Mac by Whisper, free and offline, or by OpenAI with your key.
 - **🔊 mutes what you choose:** all on, the sounds only, the voice only, or everything.
@@ -116,7 +116,7 @@ That model understands English. For other languages, put `ggml-small.bin` (or `g
 1. **It listens to the chat.** As Claude writes, each message comes in (`session.append`) and is split into caption lines. Tool calls (`tool.call`) tell it what Claude is doing, and the task list follows Claude's plan updates. A long first sentence is said only up to a point where it still makes sense.
 2. **Claude writes the gist.** A short instruction added to Claude's prompt (`prompt.compose`) asks it to call the mod's own `panel` tool right before its final message in each reply (`$.tool.register`) with the tag (Done, Update, Needs you or Question), the line to say out loud, up to 3 points, the names of anything to copy, any options, and whether the full reply must be read. The tool only hands the panel its line: it never asks you for permission and shows as a small collapsed row in the chat. If a reply has no panel call, the mod reads a written note instead (`[bob-tag]` / `[bob-say]` reference lines), then asks a small, fast model (Claude Haiku), and if that doesn't come within 15 seconds, says the end of the reply.
 3. **It speaks.** By default the Mac's own voice reads each line (`say`), and reports each word as it says it, so the captions light up exactly in time. With `/bob live`, each line goes to OpenAI's live voice, streamed so it starts at once, with the time of each word. With `/bob normal`, OpenAI's text-to-speech reads it, and the highlight follows the voice's pauses.
-4. **It draws the panel** above the message box (`ui.render` for `AbovePrompt`): the orb, the captions, the status, and the card with the reply, the buttons and the time.
+4. **It draws the panel** above the message box (`ui.render` for `AbovePrompt`): the orb, the captions, the status, and the card with the reply, sized to fit (`fitCard`, `cardSide`); the full reply opens in its side panel (`ui.render` for `Pane`).
 5. **It answers for you.** Claude's questions, permission prompts and plan approvals are caught as they happen (`classic.PermissionRequest`), shown as buttons, and your click goes back to Claude exactly as the app's own dialog would send it.
 6. **It keeps itself visible.** The app's own "next step" box would cover the panel, so a short note in Claude's instructions (`prompt.compose`) asks it to put questions in plain words instead.
 7. **It hears you.** 🎙 records your microphone with `ffmpeg`, Whisper (or OpenAI) writes it out, and `$.prompt.fill` puts it in the message box.
@@ -132,13 +132,13 @@ That model understands English. For other languages, put `ggml-small.bin` (or `g
 | `helpers/realtime-voice.mjs` | Reads one line with OpenAI's live voice and writes a WAV, with the time of each word. Takes are cached in `~/.cache/bob-voice`. |
 | `helpers/realtime-stream.mjs` | The streamed version: the voice starts as soon as the first sound arrives. |
 | `sounds/*.wav` | The send, heartbeat, question, done and tap sounds. |
-| `tests/*.test.tsx` | 98 tests covering every feature: each panel case (two things to copy, a choice between plans, sent files, links, a must-read), the Mac voice's word timing, the mute choices, 🎙 with Whisper and with OpenAI, and more. Run them with `claude plugin test .` |
+| `tests/*.test.tsx` | 105 tests covering every feature: each panel case (two things to copy, a choice between plans, sent files, links, a must-read), the Mac voice's word timing, the mute choices, 🎙 with Whisper and with OpenAI, and more. Run them with `claude plugin test .` |
 
 Inside `hooks/register.tsx`, the main pieces:
 
 - `addText` takes in each new message. `play` walks the caption lines one by one; `sayLine` reads a line with the Mac's voice and lights each word as it's said, and `streamLine` does the same with the live voice.
 - The `panel` tool's `tool.call` hook takes Claude's line; `noteOf` reads a written note when there is no tool call; `summarize` asks the small model only when there is neither, and `fallbackSummary` uses the end of the reply if that fails too. `closingSentences` decides what is said at the end, and `openingPart` how much of a long first sentence.
-- `drawStage` draws the panel, `card` the finished reply with its buttons, points and Full reply, and `askButtons` the answer buttons. `copyNamesOf` and `linksOf` find what to copy and what to open.
+- `drawStage` draws the panel, `card` the finished reply (its line, answers, points and Full reply), `cardSide` the column under the orb (the time, Copy and Open), `fitCard` what fits, and `askButtons` the answer buttons. `copyNamesOf` and `linksOf` find what to copy and what to open.
 - `panelAskOf` turns a question, permission or plan into buttons. `answerAsk` and `decisionOf` send your answer back.
 - `micToggle`, `startMic`, `stopMic` and `heardText` are 🎙; `whisperText` and `openAiText` write out what you said.
 - `engineOf` says which voice is picked (`/bob mac`, `normal` or `live`). `synthesize` (normal) and `synthesizeLive` (live) make the OpenAI voice, and `findKey` and `openAiKey` find your key.

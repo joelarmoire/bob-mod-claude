@@ -18,6 +18,14 @@ const BAND = {
   },
 } as const
 
+// The side panel on the right, where Full reply opens.
+const PANE_SITE = {
+  plugin: 'bob-talks-back',
+  component: 'Pane',
+  requestId: 'bob',
+  props: { title: 'Full reply', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+} as const
+
 const PCM_TONE = (() => {
   // 0.2 s of quiet, 0.6 s of tone, 0.2 s of quiet, as OpenAI pads a take.
   const samples = 24000
@@ -1232,7 +1240,7 @@ test('57. the instructions ask Claude for the note, in the desktop app and in a 
   }
 })
 
-test('58. something to copy gets a card named by Claude: Show opens it in the panel, Copy copies it', async ($, on) => {
+test('58. something to copy gets a Copy button under the orb, named by Claude; its text is in Full reply', async ($, on) => {
   const { clock } = boot(on, { voice: false })
   const copied: string[] = []
   on('ui.copy', (_, e) => {
@@ -1248,10 +1256,8 @@ test('58. something to copy gets a card named by Claude: Show opens it in the pa
   await clock.advance(30_000)
 
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect((await band.find({ type: 'Text', text: 'Tweet reply' }))?.text).toBe('Tweet reply')
+  expect((await band.find({ type: 'Text', text: /^“Claude talks back now\./ }))?.text).toMatch(/^“Claude talks back now\./)
   expect(await band.find({ type: 'Text', text: /Try it\./ })).toBeUndefined()
-  await band.press({ key: 'showbutton0' })
-  expect((await band.find({ type: 'Text', text: /Claude talks back now\.\nTry it\./ }))).toBeDefined()
   await band.press({ key: 'copybutton0' })
   expect(copied).toEqual(['Claude talks back now.\nTry it.'])
   await band.unmount()
@@ -1287,8 +1293,12 @@ test('60. Full reply opens the whole reply in the panel', async ($, on) => {
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await band.find({ type: 'Text', text: 'Point 7 of the plan has a few words in it.' })).toBeUndefined()
   await band.press({ key: 'fullbutton' })
-  expect(String((await band.find({ type: 'Markdown' }))?.props.text)).toContain('Point 7 of the plan has a few words in it.')
+  // It opens in the side panel on the right; the band stays as it was, its button now Hide full reply.
+  expect(await band.find({ type: 'Markdown' })).toBeUndefined()
   expect(String((await band.find({ key: 'fullbutton' }))?.props.label).trim()).toBe('Hide full reply')
+  const pane = await $.ui.mount({ ...PANE_SITE, surface: 'desktop' })
+  expect(String((await pane.find({ type: 'Markdown' }))?.props.text)).toContain('Point 7 of the plan has a few words in it.')
+  await pane.unmount()
   await band.unmount()
 })
 
@@ -1306,7 +1316,7 @@ test('61. the one-line note: the main line, its points on the card, a named copy
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect((await band.find({ type: 'Text', text: 'Post it tonight?' }))?.text).toBe('Post it tonight?')
   expect((await band.find({ type: 'Text', text: '• A testing plan before we publish' }))?.text).toBe('• A testing plan before we publish')
-  expect((await band.find({ type: 'Text', text: 'Tweet reply' }))?.text).toBe('Tweet reply')
+  expect((await band.find({ type: 'Text', text: /^“Claude talks back now\./ }))?.text).toMatch(/^“Claude talks back now\./)
   expect((await band.findAll({ type: 'Button' })).map(one => String(one.props.label).trim())).toEqual(expect.arrayContaining(['Tonight', 'Tomorrow']))
   expect(await band.find({ type: 'Text', text: /\[bob\]/ })).toBeUndefined()
   await band.unmount()
@@ -1328,8 +1338,9 @@ test('62. case: two texts to copy get two named cards, each with its own Show an
   await finish($, clock, long('Main tweet:\n\n```text\nFirst tweet.\n```\n\nReply:\n\n```text\nSecond tweet.\n```') +
     '\n\n[bob]: # "Done: Both tweets are ready | Say: Both tweets are ready to copy in the panel. | Copy: Main tweet | Copy: Reply"')
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect((await band.find({ type: 'Text', text: 'Main tweet' }))?.text).toBe('Main tweet')
-  expect((await band.find({ type: 'Text', text: 'Reply' }))?.text).toBe('Reply')
+  // What each button copies, shown as its own first words.
+  expect((await band.find({ type: 'Text', text: '“First tweet.”' }))?.text).toBe('“First tweet.”')
+  expect((await band.find({ type: 'Text', text: '“Second tweet.”' }))?.text).toBe('“Second tweet.”')
   await band.press({ key: 'copybutton1' })
   await band.press({ key: 'copybutton0' })
   expect(copied).toEqual(['Second tweet.', 'First tweet.'])
@@ -1388,9 +1399,11 @@ test('66. case: the full reply in the panel never shows the hidden note', async 
   await finish($, clock, `${body}\n\n[bob]: # "Update: Ten parts explained | Say: I explained it in ten parts. | Point: The last part matters most"`)
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   await band.press({ key: 'fullbutton' })
-  const full = String((await band.find({ type: 'Markdown' }))?.props.text)
+  const pane = await $.ui.mount({ ...PANE_SITE, surface: 'desktop' })
+  const full = String((await pane.find({ type: 'Markdown' }))?.props.text)
   expect(full).toContain('Part 10 explains one more thing about it.')
   expect(full).not.toMatch(/\[bob|Say:/)
+  await pane.unmount()
   await band.unmount()
 })
 
@@ -1403,11 +1416,11 @@ test('67. case: everything at once: question, points, a copy card, a sent file, 
   await finish($, clock, long('Copy this:\n\n```text\nthe caption\n```\n\nCode: https://github.com/a/b') +
     '\n\n[bob]: # "Question: Post now? | Say: The clip and caption are ready, and the repo link is in the panel. | Point: The repo is still private | Copy: Caption | Option: Post now | Option: Wait"')
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  for (const text of ['Post now?', '• The repo is still private', 'Caption', 'clip.mp4', 'github.com/a/b']) {
+  for (const text of ['Post now?', '• The repo is still private', '“the caption”', 'clip.mp4', 'github.com/a/b']) {
     expect((await band.find({ type: 'Text', text }))?.text).toBe(text)
   }
   expect((await band.findAll({ type: 'Button' })).map(one => String(one.props.label).trim())).toEqual(
-    expect.arrayContaining(['Post now', 'Wait', 'Copy', 'Show', 'Open']),
+    expect.arrayContaining(['Post now', 'Wait', 'Copy', 'Open']),
   )
   await band.unmount()
 })
@@ -1424,7 +1437,7 @@ test('68. the two-line note carries points, copy names and options in its say li
 
   expect(summaries).toHaveLength(0)
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  for (const text of ['Post it tonight?', 'The tweet is ready to copy in the panel.', '• A testing plan before we publish', 'Tweet reply']) {
+  for (const text of ['Post it tonight?', 'The tweet is ready to copy in the panel.', '• A testing plan before we publish', '“Claude talks back now.”']) {
     expect((await band.find({ type: 'Text', text }))?.text).toBe(text)
   }
   expect((await band.findAll({ type: 'Button' })).map(one => String(one.props.label).trim())).toEqual(expect.arrayContaining(['Tonight', 'Tomorrow']))
@@ -1470,7 +1483,7 @@ test('70. the panel tool: Claude hands the line over through a tool, so nothing 
 
   expect(summaries).toHaveLength(0)
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  for (const text of ['Post it tonight?', 'The tweet is ready to copy in the panel.', '• A testing plan before we publish', 'Tweet reply']) {
+  for (const text of ['Post it tonight?', 'The tweet is ready to copy in the panel.', '• A testing plan before we publish', '“Claude talks back now.”']) {
     expect((await band.find({ type: 'Text', text }))?.text).toBe(text)
   }
   expect((await band.findAll({ type: 'Button' })).map(one => String(one.props.label).trim())).toEqual(expect.arrayContaining(['Tonight', 'Tomorrow']))
@@ -1489,12 +1502,15 @@ test('71. a must-read: the voice says to open the full reply, the button stands 
   const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-1) ?? '')
   expect(said.some(one => one.includes('Open the full reply in the panel: the steps to follow.'))).toBe(true)
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(String((await band.find({ key: 'fullbutton' }))?.props.label).trim()).toBe('Must read: full reply')
-  expect((await band.find({ type: 'Text', text: /^the steps to follow$/ }))?.text).toBe('the steps to follow')
+  // At the bottom right, in a thin orange frame: "! Must read" and the Full reply button; the reason is said out loud.
+  expect((await band.find({ type: 'Text', text: '! Must read' }))?.text).toBe('! Must read')
+  expect(String((await band.find({ key: 'fullbutton' }))?.props.label).trim()).toBe('Full reply')
   await band.press({ key: 'fullbutton' })
-  const full = await band.find({ type: 'Markdown' })
+  const pane = await $.ui.mount({ ...PANE_SITE, surface: 'desktop' })
+  const full = await pane.find({ type: 'Markdown' })
   expect(String(full?.props.text)).toContain('Step two pastes the key.')
   expect(full?.props.dimColor).toBeFalsy()
+  await pane.unmount()
   await band.unmount()
 })
 
@@ -1511,11 +1527,13 @@ test('72. an open full reply has Copy all, which copies the whole reply without 
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await band.find({ key: 'copyfull' })).toBeUndefined()
   await band.press({ key: 'fullbutton' })
-  await band.press({ key: 'copyfull' })
+  const pane = await $.ui.mount({ ...PANE_SITE, surface: 'desktop' })
+  await pane.press({ key: 'copyfull' })
   expect(copied).toHaveLength(1)
   expect(copied[0]).toContain('Point 12 of the plan has a few words in it.')
   expect(copied[0]).not.toContain('[bob-tag]')
-  expect(String((await band.find({ key: 'copyfull' }))?.props.label).trim()).toBe('✓ Copied')
+  expect(String((await pane.find({ key: 'copyfull' }))?.props.label).trim()).toBe('✓ Copied')
+  await pane.unmount()
   await band.unmount()
 })
 
@@ -1880,7 +1898,8 @@ test('92. the card puts what you click right under the line, points below; a mus
   const firstPoint = order.findIndex(one => one.startsWith('• '))
   expect(mustRead).toBeGreaterThan(-1)
   expect(open).toBeGreaterThan(-1)
-  expect(mustRead).toBeLessThan(firstPoint)
+  // Must read closes the card at the bottom right, after the points.
+  expect(mustRead).toBeGreaterThan(firstPoint)
   expect(open).toBeLessThan(firstPoint)
   await band.unmount()
 })
@@ -1950,7 +1969,155 @@ test('98. the desktop app starts its sessions not interactive and without a surf
   expect(runs.some(argv => argv[0] === 'say')).toBe(true)
 })
 
-test('100. out of the box the free Mac voice speaks, even with an OpenAI key', async ($, on) => {
+test('99. a crowded question card: the answer buttons right under the question, the say line without the repeated question, and Must read at the bottom right', async ($, on) => {
+  const { clock } = boot(on, { voice: false })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'what next' })
+  await $.session.append(says(long('GitHub matches your copy.')))
+  await $.tool.call({
+    tool: 'mcp__bob-talks-back__panel',
+    tag: 'Question: Add a costs note and one desktop install test?',
+    say: 'GitHub matches your copy exactly. Want a costs note in the README and a desktop test?',
+    options: ['Yes, both', 'Only the costs note', 'Ship as is'],
+    mustRead: 'the honest list of costs',
+  } as never)
+  await $.turn.complete({ answer: long('GitHub matches your copy.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const order = (await band.findAll({})).map(one => String(one.key ?? one.text ?? ''))
+  const at = (pick: (one: string) => boolean) => order.findIndex(pick)
+  const question = at(one => one === 'Add a costs note and one desktop install test?')
+  const firstChoice = at(one => one === 'choice0')
+  const say = at(one => one === 'GitHub matches your copy exactly.')
+  expect(question).toBeGreaterThan(-1)
+  expect(firstChoice).toBeGreaterThan(question)
+  expect(say).toBeGreaterThan(firstChoice)
+  expect(order.some(one => one.includes('Want a costs note'))).toBe(false)
+  // Must read with Full reply closes the card at the bottom right, under your message.
+  expect(at(one => one === 'fullbutton')).toBeGreaterThan(say)
+  expect(at(one => one === 'fullbutton')).toBeGreaterThan(at(one => one === 'what next'))
+  await band.unmount()
+})
+
+test('100. a summary that starts with the sentence the voice just said says only the rest, never the same words twice', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true, sayMs: 1000 })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'did it work' })
+  await $.session.append(says(long('Your desktop test worked. In the new chat the mod installed and loaded.')))
+  await clock.advance(3000)
+  await $.tool.call({
+    tool: 'mcp__bob-talks-back__panel',
+    tag: 'Done: the desktop test worked',
+    say: 'Your desktop test worked: the GitHub version installed, loaded, and said hi.',
+  } as never)
+  await $.turn.complete({ answer: long('Your desktop test worked.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(60_000)
+  const said = runs.filter(argv => argv[0] === 'say').map(argv => argv.at(-2) ?? '')
+  expect(said.filter(one => /your desktop test worked/i.test(one))).toHaveLength(1)
+  expect(said.some(one => one.startsWith('The GitHub version installed, loaded, and said hi.'))).toBe(true)
+})
+
+test('101. Full reply opens in the side panel, Copy all at its top above the text; the band keeps its button in place', async ($, on) => {
+  const { clock } = boot(on, { voice: false, gist: 'Update: The plan is set.' })
+  const opened: string[] = []
+  on('ui.open', (_, e) => (opened.push(e.id), { value: { isPlaced: true } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'what is the plan' })
+  const reply = Array.from({ length: 12 }, (_, at) => `Point ${at + 1} of the plan has a few words in it.`).join(' ')
+  await $.session.append(says(reply))
+  await $.turn.complete({ answer: reply, durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'fullbutton' })
+  expect(opened).toContain('bob')
+  const pane = await $.ui.mount({ ...PANE_SITE, surface: 'desktop' })
+  const order = (await pane.findAll({})).map(one => (one.type === 'Markdown' ? 'markdown' : String(one.key ?? '')))
+  expect(order.indexOf('copyfull')).toBeLessThan(order.indexOf('markdown'))
+  await pane.unmount()
+  await band.unmount()
+})
+
+test('102. a card too tall for the band keeps Full reply in view: the points give way first, then the say line is cut with …', async ($, on) => {
+  const { clock } = boot(on, { voice: false })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'crowded' })
+  await $.session.append(says(long('A crowded reply.')))
+  const say = 'This card is the most crowded case there is, with four long choices to pick between, a long say line that keeps going on and on about everything that happened, and three points after it.'
+  await $.tool.call({
+    tool: 'mcp__bob-talks-back__panel',
+    tag: 'Question: Crowded test 3 — is this card clean enough to ship to everyone today?',
+    say,
+    points: ['Copy and Open sit under the orb now', 'Must read closes the card at the bottom right', 'All the tests pass on both copies'],
+    options: ['Looks good, push it', 'Still too crowded', 'Bigger text please', 'Another crowded test'],
+    mustRead: 'crowded test',
+  } as never)
+  await $.turn.complete({ answer: long('A crowded reply.'), durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await band.find({ key: 'fullbutton' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /^• / })).toBeUndefined()
+  const shown = String((await band.find({ type: 'Text', text: /^This card is the most crowded/ }))?.text ?? '')
+  expect(shown.endsWith('…')).toBe(true)
+  expect(shown.length).toBeLessThan(say.length)
+  await band.press({ key: 'fullbutton' })
+  // Opened on the right, the side panel shows everything the band left out.
+  const pane = await $.ui.mount({ ...PANE_SITE, surface: 'desktop' })
+  expect((await pane.findAll({ type: 'Text', text: /^• / })).length).toBe(3)
+  await pane.unmount()
+  await band.unmount()
+})
+
+test('103. a card that fits shows its say line and points whole', async ($, on) => {
+  const { clock } = boot(on, { voice: false })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'short' })
+  await $.session.append(says('All set.'))
+  await $.tool.call({ tool: 'mcp__bob-talks-back__panel', tag: 'Done: all set', say: 'Everything is in place.', points: ['One point', 'Two points'] } as never)
+  await $.turn.complete({ answer: 'All set.', durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await band.find({ type: 'Text', text: 'Everything is in place.' }))?.text).toBe('Everything is in place.')
+  expect((await band.findAll({ type: 'Text', text: /^• / })).length).toBe(2)
+  await band.unmount()
+})
+
+test('104. a long reply that asks a question with choices still gets Full reply', async ($, on) => {
+  const { clock } = boot(on, { voice: false })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'keep it?' })
+  const reply = Array.from({ length: 12 }, (_, at) => `Point ${at + 1} of the answer has a few words in it.`).join(' ')
+  await $.session.append(says(reply))
+  await $.tool.call({ tool: 'mcp__bob-talks-back__panel', tag: 'Question: Keep it?', say: 'It only cuts crowded cards.', options: ['Keep it', 'No trimming'] } as never)
+  await $.turn.complete({ answer: reply, durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(String((await band.find({ key: 'fullbutton' }))?.props.label).trim()).toBe('Full reply')
+  await band.unmount()
+})
+
+test('105. many things to copy and open: those that fit show under the orb, the rest behind "+N more", which shows them all', async ($, on) => {
+  const { clock } = boot(on, { voice: false })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'everything' })
+  const blocks = ['npm run build', 'npm run test', 'npm run deploy', 'git push origin main'].map(one => `\`\`\`bash\n${one}\n\`\`\``).join('\n\n')
+  const reply = long(`Run these:\n\n${blocks}\n\nFiles: [a.md](/x/a.md), [b.md](/x/b.md), [c.md](/x/c.md).`)
+  await $.session.append(says(reply))
+  await $.turn.complete({ answer: reply, durationMs: 5, isAborted: false, turnId: 't' })
+  await clock.advance(30_000)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const count = async () => (await band.findAll({ type: 'Button' })).filter(one => /^(Copy|Open)$/.test(String(one.props.label).trim())).length
+  const before = await count()
+  expect(before).toBeLessThan(7)
+  expect(String((await band.find({ key: 'sidemore' }))?.props.label)).toBe(`+${7 - before} more`)
+  await band.press({ key: 'sidemore' })
+  const pane = await $.ui.mount({ ...PANE_SITE, surface: 'desktop' })
+  const inPane = (await pane.findAll({ type: 'Button' })).filter(one => /^(Copy|Open)$/.test(String(one.props.label).trim())).length
+  expect(inPane).toBe(7)
+  await pane.unmount()
+  await band.unmount()
+})
+
+test('106. out of the box the free Mac voice speaks, even with an OpenAI key', async ($, on) => {
   const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'hello' })
@@ -1963,7 +2130,7 @@ test('100. out of the box the free Mac voice speaks, even with an OpenAI key', a
   expect(runs.some(argv => argv[0] === 'say')).toBe(true)
 })
 
-test('101. /bob normal speaks with OpenAI text-to-speech, /bob live with the live voice, /bob mac back to free', async ($, on) => {
+test('107. /bob normal speaks with OpenAI text-to-speech, /bob live with the live voice, /bob mac back to free', async ($, on) => {
   const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 

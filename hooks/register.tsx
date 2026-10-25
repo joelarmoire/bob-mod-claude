@@ -146,7 +146,7 @@ const PANEL_TOOL_SPEC = {
 const PANEL_TOOL_NOTE = [
   `Once per reply, call the ${PANEL_TOOL} tool right before you write your final message to the user (after any other tools), then write that message. Its line must match what the message says.`,
   'tag: Question: when you ask the user something, Needs you: only when the work is waiting on the user right now, Done: when the work is finished, Update: otherwise, then at most 10 words.',
-  'say: one or two short sentences, at most 30 words, with what matters most to the user right now; when the reply has something to copy, a file or link to open, or a step to do outside the chat, say so.',
+  'say: one or two short sentences, at most 30 words, with what matters most to the user right now; when the reply has something to copy, a file or link to open, or a step to do outside the chat, say so. The voice has just read your message\'s first sentence, so never start with it.',
   'points: one short line for each other new thing in the reply (at most 3), so nothing in it is missing from the panel.',
   'copy: put anything the user should copy (a tweet, a command, a prompt) in a code block, and name each one here, in order.',
   'options: up to 4 short choices, only when you ask the user to pick between named options.',
@@ -1338,11 +1338,32 @@ const plainWords = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/
 function unsaid(texts: string[], said: string): string[] {
   const heard = ` ${plainWords(said)} `
   const isHeard = (text: string) => plainWords(text) !== '' && heard.includes(` ${plainWords(text)} `)
+  // A sentence that starts with one already said ("Your test worked." then "Your test worked: it loaded.") says only
+  // the rest, so the same words are never heard twice in a row.
+  const heardSentences = said
+    .split(/(?<=[.!?])\s+/)
+    .map(plainWords)
+    .filter(one => one.split(' ').length >= 3)
+  const restOf = (sentence: string) => {
+    const words = sentence.split(/\s+/)
+    for (const one of heardSentences) {
+      const size = one.split(' ').length
+      if (words.length <= size || plainWords(words.slice(0, size).join(' ')) !== one) continue
+      const rest = words.slice(size).join(' ').replace(/^[\s:;,—–-]+/, '')
+      return rest.charAt(0).toUpperCase() + rest.slice(1)
+    }
+    return sentence
+  }
   return texts
     .map(text =>
       needsYou(text)
         ? isHeard(text) ? '' : text
-        : text.split(/(?<=[.!?])\s+/).filter(one => !isHeard(one)).join(' ').trim(),
+        : text
+            .split(/(?<=[.!?])\s+/)
+            .filter(one => !isHeard(one))
+            .map(restOf)
+            .join(' ')
+            .trim(),
     )
     .filter(text => text !== '')
 }
@@ -1967,7 +1988,130 @@ type CopySurface = Parameters<EngineInterface['ui']['copy']>[0]['surface']
 
 // The finished reply at a glance: Bob's line big, your message as one small
 // line, the key points one at a time, and what you can do with it.
-function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'brief' | 'pane' = 'band') {
+// The orb's column on the band's finished card, the space under the orb that was empty: the time, then what to copy
+// and what to open, each name with its button right under it, so the text beside it keeps the line, the answers and
+// Full reply, and nothing you click needs a scroll.
+const SIDE_CELLS = 16
+// How many things to copy or open the side column holds.
+function sideCount(current: Reply): number {
+  const whole = current.blocks.map(one => one.text).join('\n\n')
+  if (moodOf(current) !== 'idle' || whole.trim() === '') return 0
+  const opened = (current.opened ?? []).filter(one => one.target !== '')
+  const openedTargets = new Set(opened.map(one => one.target))
+  return commandsOf(whole).length + opened.length + linksOf(whole).filter(one => !openedTargets.has(one.target)).length
+}
+
+// The side column fits the band like the card does: about this many lines under the orb (the time included), each
+// thing taking its words (short lines in this narrow column) and its button.
+const SIDE_LINES = 13
+const SIDE_LINE_CHARS = 20
+function cardSide(ui: Kit, current: Reply, actions: CardActions, orbSize = 72) {
+  const { Box, Button, Text } = ui
+  const whole = current.blocks.map(one => one.text).join('\n\n')
+  const isDone = moodOf(current) === 'idle' && whole.trim() !== ''
+  const commands = isDone ? commandsOf(whole) : []
+  const opened = (current.opened ?? []).filter(one => one.target !== '')
+  const openedTargets = new Set(opened.map(one => one.target))
+  const links = isDone ? linksOf(whole).filter(one => !openedTargets.has(one.target)) : []
+  // What it is first, then its button right under it, spaced, so each button plainly belongs to the words above it.
+  const things: { key: string; name: string; button: unknown }[] = [
+    ...commands.map((command, at) => {
+      // The text itself says what you copy: its first words, not a name.
+      const firstLine = (command.split('\n')[0] ?? '').trim()
+      const cut = firstLine.length > 40 ? firstLine.slice(0, 40).replace(/\s+\S*$/, '') : firstLine
+      return {
+        key: `copy${at}`,
+        name: `“${cut}${cut.length < firstLine.length || command.includes('\n') ? '…' : ''}”`,
+        button: (
+          <Button
+            key={`copybutton${at}`}
+            variant="secondary"
+            label={current.copied === command ? '✓ Copied' : 'Copy'}
+            onPress={press => actions.onCopy(command, press.surface)}
+          />
+        ),
+      }
+    }),
+    ...opened.map((one, at) => ({
+      key: `opened${at}`,
+      name: one.name,
+      button: <Button key={`openbutton${at}`} variant="secondary" label="Open" onPress={() => actions.onOpen(one.target)} />,
+    })),
+    ...links.map((one, at) => ({
+      key: `link${at}`,
+      name: one.name,
+      button: <Button key={`linkbutton${at}`} variant="secondary" label="Open" onPress={() => actions.onOpen(one.target)} />,
+    })),
+  ]
+  // As many as fit above the band's edge; the rest wait behind "+N more", which opens the full reply in the side panel,
+  // where every one of them is.
+  const heightOf = (name: string) => Math.ceil(name.length / SIDE_LINE_CHARS) * 0.9 + 2.1
+  // The orb (about 22 px a line) and the time take the column's top.
+  let room = SIDE_LINES - (orbSize / 22 + 0.4) - 1.4
+  let shown = things.length
+  if (things.reduce((sum, one) => sum + heightOf(one.name), 0) > room) {
+    room -= 2.1
+    shown = 0
+    for (const one of things) {
+      if (heightOf(one.name) > room) break
+      room -= heightOf(one.name)
+      shown++
+    }
+  }
+  return (
+    <Box flexDirection="column" alignItems="center" gap={1} width={SIDE_CELLS}>
+      <Text size="caption" tabular dimColor>
+        {clockOf(current.seconds)}
+      </Text>
+      {things.slice(0, shown).map(one => (
+        <Box key={one.key} flexDirection="column" alignItems="center" gap={1}>
+          <Text size="footnote">{one.name}</Text>
+          {one.button}
+        </Box>
+      ))}
+      {shown < things.length && (
+        <Button key="sidemore" variant="secondary" label={`+${things.length - shown} more`} onPress={() => actions.onFull()} />
+      )}
+    </Box>
+  )
+}
+
+// The band shows about this many lines of body text without a scroll, a line holding about this many characters
+// beside the orb's column; the heading's larger text holds fewer.
+const CARD_LINES = 12
+const CARD_LINE_CHARS = 60
+const HEADING_LINE_CHARS = 42
+type CardFit = { lines: number; chars: number }
+
+// What of the say line and the points fits under the line, the answers and Full reply, so that Full reply at the
+// bottom right is in view: the points give way first, then the say line is cut short with "…".
+function fitCard(heading: string, options: string[], hasMore: boolean, say: string, points: string[], fit: CardFit = { lines: CARD_LINES, chars: CARD_LINE_CHARS }, yours = '') {
+  const linesOf = (text: string, chars: number) => (text === '' ? 0 : Math.ceil(text.length / chars))
+  const headingChars = Math.round((fit.chars * HEADING_LINE_CHARS) / CARD_LINE_CHARS)
+  const choiceRows = options.length === 0 ? 0 : Math.ceil(options.reduce((sum, one) => sum + one.length + 8, 0) / fit.chars)
+  // The tag row, the heading, the answer rows (taller than text) and Full reply's row, each with the gap after it.
+  // Your message's line(s) sit above Full reply too, in smaller text.
+  const fixed = 1.4 + linesOf(heading, headingChars) * 1.3 + choiceRows * 1.8 + (hasMore ? 1.8 : 0) + linesOf(yours, fit.chars + 10) * 0.9
+  let left = fit.lines - fixed
+  const sayLines = linesOf(say, fit.chars) + (say === '' ? 0 : 0.4)
+  const pointLines = points.map(one => linesOf(`• ${one}`, fit.chars) + 0.4)
+  if (sayLines + pointLines.reduce((sum, one) => sum + one, 0) <= left) return { say, points }
+  const kept: string[] = []
+  left -= sayLines
+  for (const [at, point] of points.entries()) {
+    if ((pointLines[at] ?? 1) > left) break
+    kept.push(point)
+    left -= pointLines[at] ?? 1
+  }
+  if (left >= 0) return { say, points: kept }
+  // Even alone the say line runs past: cut it at a word, a line or so short of the room left.
+  const room = Math.floor((fit.lines - fixed - 0.4) * fit.chars)
+  if (room < 20) return { say: '', points: [] }
+  const cut = say.slice(0, room).replace(/\s+\S*$/, '')
+  return { say: `${cut.replace(/[,;:]$/, '')}…`, points: [] }
+}
+
+function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'brief' | 'pane' = 'band', fit?: CardFit) {
   const { Box, Button, Text } = ui
   const answer = moodOf(current) === 'idle' ? toPlain(current.blocks.map(one => one.text).join('\n\n')) : ''
   // The full reply as the chat draws it, without the hidden note.
@@ -1992,8 +2136,20 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
   const limit = mode === 'pane' ? MAX_PROMPT : BAND_PROMPT
   // A reply that says much more than its summary gets a hint, so you know when the chat is worth a look.
   const isMustRead = mode === 'band' && current.mustRead !== undefined
-  const hasMore = isMustRead || (mode === 'band' && choice === null && answer.split(/\s+/).filter(one => one !== '').length > MORE_WORDS)
+  const isLong = answer.split(/\s+/).filter(one => one !== '').length > MORE_WORDS
   const prompt = current.prompt.length > limit ? `${current.prompt.slice(0, limit).trimEnd()}…` : current.prompt
+  // The line under the buttons; on a question card, without its own ending question, which is the heading already.
+  const asked = isAsk ? endingQuestion(current.say ?? '') : undefined
+  const shownSay = asked !== undefined ? asked.before : (current.say ?? '')
+  const headingText = text !== '' ? text : (paragraphs[0] ?? '')
+  const uncut = { say: shownSay, points: current.points ?? [] }
+  const options = choice?.options.map(option => option.label) ?? []
+  // Full reply shows whenever there is more to read: a must-read, a long reply (a question's too), or a card that had
+  // to be cut to fit.
+  const fittedWithButton = mode === 'band' ? fitCard(headingText, options, true, shownSay, uncut.points, fit, `you ${prompt}`) : uncut
+  const isCut = fittedWithButton.say !== uncut.say || fittedWithButton.points.length < uncut.points.length
+  const hasMore = mode === 'band' && (isMustRead || isLong || isCut)
+  const fitted = mode === 'band' && hasMore ? fittedWithButton : uncut
   const you = prompt !== '' && mode !== 'brief' && (
     <Box flexDirection="row" gap={1}>
       <Text size="footnote" dimColor>
@@ -2013,16 +2169,15 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
             {tag !== '' ? tag : 'DONE'}
           </Text>
         </Box>
-        <Text size="caption" tabular dimColor>
-          {clockOf(current.seconds)}
-        </Text>
+        {mode !== 'band' && (
+          <Text size="caption" tabular dimColor>
+            {clockOf(current.seconds)}
+          </Text>
+        )}
       </Box>
-      {isAsk && current.say && mode !== 'brief' && <Text size="body">{current.say}</Text>}
       <Text size="heading" weight="bold">
         {text !== '' ? text : (paragraphs[0] ?? '')}
       </Text>
-      {!isAsk && current.say && mode !== 'brief' && <Text size="body">{current.say}</Text>}
-      {/* What you click comes first, right under the line: the panel is short, so the points go below. */}
       {choice !== null && choice.options.length > 0 && mode !== 'brief' && (
         <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1} marginTop={1}>
           {choice.options.map((option, at) => {
@@ -2042,46 +2197,6 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
           })}
         </Box>
       )}
-      {hasMore &&
-        (isMustRead && !current.isFullAnswer ? (
-          // A must-read is one button that says so, framed in Claude's orange with a "!" (the app draws its own white
-          // button, which a mod cannot recolor), then why.
-          <Box
-            flexDirection="row"
-            alignItems="center"
-            alignSelf="flex-start"
-            gap={1}
-            paddingX={1}
-            borderStyle="round"
-            borderColor={HIGHLIGHT}
-          >
-            <Text size="body" weight="bold" color={CLAUDE_ORANGE}>
-              !
-            </Text>
-            <Button key="fullbutton" variant="primary" label="Must read: full reply" onPress={() => actions.onFull()} />
-            <Text size="footnote" weight="semibold" color={CLAUDE_ORANGE}>
-              {current.mustRead}
-            </Text>
-          </Box>
-        ) : (
-          <Box flexDirection="row" gap={1}>
-            <Button
-              key="fullbutton"
-              variant="secondary"
-              label={current.isFullAnswer ? 'Hide full reply' : 'Full reply'}
-              onPress={() => actions.onFull()}
-            />
-            {/* The panel cannot select text: the whole reply goes to the clipboard, to paste and keep the part you need. */}
-            {current.isFullAnswer && (
-              <Button
-                key="copyfull"
-                variant="secondary"
-                label={current.copied === fullText ? '✓ Copied' : 'Copy all'}
-                onPress={press => actions.onCopy(fullText, press.surface)}
-              />
-            )}
-          </Box>
-        ))}
       {current.failure && (
         <Box flexDirection="row" alignItems="center" gap={1}>
           <Text size="footnote" weight="medium" color={FAILURE_RED}>
@@ -2092,84 +2207,81 @@ function card(ui: Kit, current: Reply, actions: CardActions, mode: 'band' | 'bri
           )}
         </Box>
       )}
-      {mode !== 'brief' &&
-        (current.opened ?? []).map((one, at) => (
-          <Box key={`opened${at}`} flexDirection="row" alignItems="center" gap={1}>
-            {one.target !== '' && (
-              <Button key={`openbutton${at}`} variant="primary" label="Open" onPress={() => actions.onOpen(one.target)} />
-            )}
-            <Text size="footnote" dimColor>
-              {one.name}
-            </Text>
-          </Box>
-        ))}
-      {mode !== 'brief' &&
-        commands.map((command, at) => {
-          const isCopied = current.copied === command
-          const name = copyNames[at]
-          // Show opens the whole text right in the panel, until you copy it or hide it again.
-          const isShown = current.shownCopy === command
-          const canShow = name !== undefined || command.includes('\n') || command.length > 60
-          return (
-            <Box key={`copy${at}`} flexDirection="column" gap={1}>
-              <Box flexDirection="row" alignItems="center" gap={1}>
-                <Button
-                  key={`copybutton${at}`}
-                  variant="primary"
-                  label={isCopied ? '✓ Copied' : 'Copy'}
-                  onPress={press => actions.onCopy(command, press.surface)}
-                />
-                {canShow && (
-                  <Button key={`showbutton${at}`} variant="secondary" label={isShown ? 'Hide' : 'Show'} onPress={() => actions.onShow(command)} />
-                )}
-                {name !== undefined ? (
-                  <Text size="footnote" weight="bold">
-                    {name}
-                  </Text>
-                ) : (
-                  <Text size="footnote" dimColor>
-                    {command.split('\n')[0]}
-                    {command.includes('\n') ? ' …' : ''}
-                  </Text>
-                )}
-              </Box>
-              {isShown && <Text size="body">{command}</Text>}
+      {/* The side panel has no orb column: its Copy and Open buttons sit here, in one row that wraps. */}
+      {mode === 'pane' && commands.length + links.length + (current.opened ?? []).length > 0 && (
+        <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={3} rowGap={1}>
+          {commands.map((command, at) => (
+            <Box key={`copy${at}`} flexDirection="row" alignItems="center" gap={1}>
+              <Button
+                key={`copybutton${at}`}
+                variant="secondary"
+                label={current.copied === command ? '✓ Copied' : 'Copy'}
+                onPress={press => actions.onCopy(command, press.surface)}
+              />
+              <Text size="footnote" dimColor>
+                {copyNames[at] ?? (command.split('\n')[0] ?? '').slice(0, 40)}
+              </Text>
             </Box>
-          )
-        })}
+          ))}
+          {[...(current.opened ?? []).filter(one => one.target !== ''), ...links].map((one, at) => (
+            <Box key={`open${at}`} flexDirection="row" alignItems="center" gap={1}>
+              <Button key={`openbutton${at}`} variant="secondary" label="Open" onPress={() => actions.onOpen(one.target)} />
+              <Text size="footnote" dimColor>
+                {one.name}
+              </Text>
+            </Box>
+          ))}
+        </Box>
+      )}
+      {fitted.say !== '' && mode !== 'brief' && <Text size="body">{fitted.say}</Text>}
       {mode !== 'brief' &&
-        links.map((one, at) => (
-          <Box key={`link${at}`} flexDirection="row" alignItems="center" gap={1}>
-            <Button key={`linkbutton${at}`} variant="primary" label="Open" onPress={() => actions.onOpen(one.target)} />
-            <Text size="footnote" dimColor>
-              {one.name}
-            </Text>
-          </Box>
-        ))}
-      {mode !== 'brief' &&
-        (current.points ?? []).map((point, at) => (
-          <Text key={`point${at}`} size="footnote" dimColor>
+        fitted.points.map((point, at) => (
+          <Text key={`point${at}`} size="body">
             {`• ${point}`}
           </Text>
         ))}
-      {hasMore &&
-        current.isFullAnswer &&
-        ('Markdown' in ui ? (
-          <ui.Markdown key="fullreply" text={fullText} />
-        ) : (
-          paragraphs.map((paragraph, at) => (
-            <Text key={`full${at}`} size="body">
-              {paragraph}
-            </Text>
-          ))
-        ))}
       {you}
-      {mode === 'pane' &&
-        paragraphs.map((paragraph, at) => (
-          <Text key={`p${at}`} size="body" dimColor>
-            {paragraph}
-          </Text>
+      {/* Full reply closes the card at its bottom right, or, when the reply must be read, "! Must read" with it in a
+          thin orange frame (a mod cannot recolor the app's white button; why it must be read is said out loud). The card
+          is fitted to the band so this spot is in view without a scroll; the full reply opens under it. */}
+      {hasMore &&
+        (isMustRead && !current.isFullAnswer ? (
+          <Box flexDirection="row" alignItems="center" alignSelf="flex-end" gap={1} paddingX={1} borderStyle="round" borderColor={HIGHLIGHT}>
+            <Text size="body" weight="bold" color={CLAUDE_ORANGE}>
+              ! Must read
+            </Text>
+            <Button key="fullbutton" variant="primary" label="Full reply" onPress={() => actions.onFull()} />
+          </Box>
+        ) : (
+          <Box flexDirection="row" alignSelf="flex-end" gap={1}>
+            <Button
+              key="fullbutton"
+              variant="secondary"
+              label={current.isFullAnswer ? 'Hide full reply' : 'Full reply'}
+              onPress={() => actions.onFull()}
+            />
+          </Box>
         ))}
+      {mode === 'pane' && fullText !== '' && (
+        <Box flexDirection="column" gap={1}>
+          {/* The panel cannot select text: the whole reply goes to the clipboard, to paste and keep the part you need. */}
+          <Button
+            key="copyfull"
+            variant="secondary"
+            label={current.copied === fullText ? '✓ Copied' : 'Copy all'}
+            onPress={press => actions.onCopy(fullText, press.surface)}
+          />
+          {'Markdown' in ui ? (
+            <ui.Markdown key="fullreply" text={fullText} />
+          ) : (
+            paragraphs.map((paragraph, at) => (
+              <Text key={`p${at}`} size="body">
+                {paragraph}
+              </Text>
+            ))
+          )}
+        </Box>
+      )}
     </Box>
   )
 }
@@ -2629,8 +2741,15 @@ async function startReply($: EngineInterface, prompt: string): Promise<number> {
   return fresh?.id ?? 0
 }
 
-function toggleFull($: EngineInterface) {
-  return update($, reply, now => (now === null ? now : { ...now, isFullAnswer: !now.isFullAnswer }))
+// Full reply opens in the side panel on the right, a page that scrolls freely, with every Copy and Open; the band above
+// the message box stays fitted (scrolled, it snaps back to the top). Closing that panel, or Hide full reply, puts it away.
+async function toggleFull($: EngineInterface) {
+  const now = await read($, reply)
+  if (now === null) return
+  const isOpening = !now.isFullAnswer
+  await update($, reply, one => (one === null ? one : { ...one, isFullAnswer: isOpening }))
+  if (isOpening) await $.ui.open({ id: PANE, title: 'Full reply' }).catch(error => log($, `full reply: ${reasonOf(error)}`))
+  else if (!(await read($, settings)).isCardInPane) await $.ui.close({ id: PANE }).catch(() => undefined)
 }
 
 async function toggleCardPane($: EngineInterface) {
@@ -3041,7 +3160,8 @@ async function drawStage($: EngineInterface, e: RenderEvent, where: 'band' | 'pa
   // so your message and his summary fit.
   const isDone =
     mood === 'idle' && current !== null && current.blocks.length > 0 && !current.isShowingAll
-  const orbSize = isCompact === true && where === 'band' ? 44 : isDone ? 72 : 104
+  const orbSize =
+    isCompact === true && where === 'band' ? 44 : isDone ? (current !== null && sideCount(current) > 0 ? 48 : 72) : 104
   const ui = $.ui.resolve(e)
   const { Box, Button, Text } = ui
   // While the mic listens, the orb turns red; only its look changes, the layout stays put.
@@ -3152,7 +3272,14 @@ async function drawStage($: EngineInterface, e: RenderEvent, where: 'band' | 'pa
 
       {isDone && current !== null && (
         <Box flexDirection="row" gap={2} alignItems="flex-start">
-          {orb}
+          {isCompact === true ? (
+            orb
+          ) : (
+            <Box flexDirection="column" alignItems="center" gap={1}>
+              {orb}
+              {cardSide(ui, current, cardActions($), orbSize)}
+            </Box>
+          )}
           <Box flexDirection="column" flexGrow={1} flexShrink={1}>
             {card(ui, current, cardActions($), isCompact === true ? 'brief' : 'band')}
             {!isCompact && helpersRow(ui, current, spinner)}
@@ -3257,7 +3384,6 @@ async function drawStage($: EngineInterface, e: RenderEvent, where: 'band' | 'pa
         {(mood === 'talking' || isQuestionComing) && (
           <Box flexDirection="row" gap={3} marginTop={1}>
             <Button key="skip" plain dimColor label="Skip" onPress={() => skip($)} />
-            <Button key="all" plain dimColor label="Show full reply" onPress={() => showAll($)} />
           </Box>
         )}
       </Box>
@@ -3706,7 +3832,7 @@ export const register: Register = (on, options) => {
 
     const current = await read($, reply)
     const mood = moodOf(current)
-    const drawn = `${e.surface} ${mood} prompt=${current?.prompt.length ?? 0} blocks=${current?.blocks.length ?? 0} line=${current?.line ?? 0}/${current?.lines.length ?? 0} pane=${isCardInPane} compact=${isCompact} shown=${current?.isShowingAll ?? false} survey=${e.props.hasSurvey} choice=${current?.choice ? 'yes' : 'no'}`
+    const drawn = `${e.surface} ${mood} prompt=${current?.prompt.length ?? 0} blocks=${current?.blocks.length ?? 0} line=${current?.line ?? 0}/${current?.lines.length ?? 0} pane=${isCardInPane} compact=${isCompact} shown=${current?.isShowingAll ?? false} survey=${e.props.hasSurvey} choice=${current?.choice ? 'yes' : 'no'} rows=${e.props.maxRows} cols=${e.props.bodyColumns}`
     if (drawn !== lastDrawn) {
       lastDrawn = drawn
       log($, `band: ${drawn}`)
@@ -3733,7 +3859,10 @@ export const register: Register = (on, options) => {
 
   on('ui.close', async ($, e, next) => {
     const result = await next(e)
-    if (e.id === PANE) await update($, settings, now => ({ ...now, isCardInPane: false }))
+    if (e.id === PANE) {
+      await update($, settings, now => ({ ...now, isCardInPane: false }))
+      await update($, reply, now => (now === null || !now.isFullAnswer ? now : { ...now, isFullAnswer: false }))
+    }
     return result
   })
 
