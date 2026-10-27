@@ -46,6 +46,7 @@ https://github.com/user-attachments/assets/7d6c1697-c564-4a9c-ba90-70a0a1e5eb8b
 - **Answer from the panel.** Questions show as buttons. Permission prompts get Allow and Deny. Plans get Approve and Keep planning.
 - **Talk to Claude with 🎙.** Click it (it turns 🔴 and the orb turns red), talk, click it again: what you said lands in the message box for you to send. It's written out on your Mac by Whisper, free and offline, or by OpenAI with your key.
 - **🔊 mutes what you choose:** all on, the sounds only, the voice only, or everything.
+- **⏭ Auto-skip, for when you just want the answer.** Click ⏭ and it becomes a filled **⏭ Auto** button: every reply goes straight to its card, with no voice-over and no captions to wait through, until you click it again. It's remembered, and a question for you still gets its ding.
 - **Three voices:** the Mac's own voice, free and on by default, or OpenAI's normal or live voice with your key (`/bob mac`, `/bob normal`, `/bob live`).
 - **Live status:** what Claude is doing right now, its task list and any helpers running.
 - **Two chats at once:** one talks while the other waits its turn.
@@ -132,7 +133,7 @@ That model understands English. For other languages, put `ggml-small.bin` (or `g
 | `helpers/realtime-voice.mjs` | Reads one line with OpenAI's live voice and writes a WAV, with the time of each word. Takes are cached in `~/.cache/bob-voice`. |
 | `helpers/realtime-stream.mjs` | The streamed version: the voice starts as soon as the first sound arrives. |
 | `sounds/*.wav` | The send, heartbeat, question, done and tap sounds. |
-| `tests/*.test.tsx` | 106 tests covering every feature: each panel case (two things to copy, a choice between plans, sent files, links, a must-read), the Mac voice's word timing, the mute choices, 🎙 with Whisper and with OpenAI, and more. Run them with `claude plugin test .` |
+| `tests/*.test.tsx` | 107 tests covering every feature: each panel case (two things to copy, a choice between plans, sent files, links, a must-read), the Mac voice's word timing, the mute choices, 🎙 with Whisper and with OpenAI, and more. Run them with `claude plugin test .` |
 
 Inside `hooks/register.tsx`, the main pieces:
 

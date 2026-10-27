@@ -91,6 +91,8 @@ export type Settings = {
   voiceEngine?: 'mac' | 'normal' | 'live'
   // The sounds (send, heartbeat, ding, done), muted apart from the voice; unset follows the voice, as before.
   isSoundOn?: boolean
+  /** ⏭ on: every answer goes straight to its card, nothing read out or played as captions. */
+  isAutoSkip?: boolean
   // The mic you talk into with 🎙: picked with /bob mic, or the last one that heard you.
   micName?: string
 }

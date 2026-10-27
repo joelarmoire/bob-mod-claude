@@ -1735,6 +1735,25 @@ test('84. while Claude works the heartbeat is steady, every 3 seconds, never a l
   expect(sounds.filter(one => one.includes('heartbeat.wav'))).toHaveLength(4)
 })
 
+test('107. ⏭ auto-skip: no voice-over and no captions to wait through: the answer shows as its card at once, and it says so', async ($, on) => {
+  const { clock, runs } = boot(on, { voice: true })
+  const toasts: string[] = []
+  on('ui.toast', (_, e) => { toasts.push(String((e as { text?: unknown }).text ?? e)); return { value: undefined as never } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'autoskip' })
+  expect(toasts.some(t => t.includes('Auto-skip on'))).toBe(true)
+  runs.length = 0
+  await $.prompt.submit({ text: 'long job' })
+  await clock.advance(5_000)
+  await $.session.append(says('All finished.'))
+  await $.turn.complete({ answer: long('All finished.'), durationMs: 5, isAborted: false, turnId: 't' } as never)
+  await clock.advance(1_500)
+  expect(runs.some(argv => argv[0] === 'say' || argv.includes('/usr/bin/afplay'))).toBe(false)
+  expect(await band.find({ type: 'Button', key: 'skip' })).toBeUndefined()
+  await band.unmount()
+})
+
 // The message box as the app keeps it, and the toasts it shows.
 function promptBox(on: On, draft = '') {
   const box = { text: draft, toasts: [] as string[] }
@@ -2136,7 +2155,7 @@ test('106. a spoken line that asks, then gives the answers ("…too? Yes or no."
   expect(said.filter(one => /ready to copy/i.test(one))).toHaveLength(1)
 })
 
-test('107. out of the box the free Mac voice speaks, even with an OpenAI key', async ($, on) => {
+test('108. out of the box the free Mac voice speaks, even with an OpenAI key', async ($, on) => {
   const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'hello' })
@@ -2149,7 +2168,7 @@ test('107. out of the box the free Mac voice speaks, even with an OpenAI key', a
   expect(runs.some(argv => argv[0] === 'say')).toBe(true)
 })
 
-test('108. /bob normal speaks with OpenAI text-to-speech, /bob live with the live voice, /bob mac back to free', async ($, on) => {
+test('109. /bob normal speaks with OpenAI text-to-speech, /bob live with the live voice, /bob mac back to free', async ($, on) => {
   const { clock, runs, fetches } = boot(on, { voice: true, key: true, live: true, engine: null, gist: 'Done: all set.\nSay: Hello there, Claude speaking.' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 

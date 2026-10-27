@@ -1725,6 +1725,13 @@ async function play($: EngineInterface) {
         continue
       }
       const sentence = sentenceAt(current.lines, current.line)
+      // ⏭ on: straight to the card. Nothing is said or captioned; a question for you still gets its ding.
+      if ((await read($, settings)).isAutoSkip === true) {
+        const isFinalNow = sentence.end === current.lines.length && !current.isWorking
+        if (isFinalNow && needsYou(sentence.text)) cue($, 'ask', 0.7)
+        await update($, reply, now => (now === null || now.id !== current.id ? now : { ...now, line: now.lines.length }))
+        continue
+      }
       taken = { id: current.id, end: sentence.end }
       // Every line is said: each message's headline as it arrives, then the
       // summary and any question that close the reply.
@@ -3269,6 +3276,18 @@ async function drawStage($: EngineInterface, e: RenderEvent, where: 'band' | 'pa
           dimColor
           label={isVoiceOn && isSoundOn ? '🔊' : isVoiceOn || isSoundOn ? '🔉' : '🔇'}
           onPress={() => update($, muteMenu, () => true)}
+        />
+        <Button
+          key="autoskip"
+          // On, it is a filled button that says so ("⏭ Auto"); off, a dim icon like its neighbours.
+          {...(shown.isAutoSkip === true ? { variant: 'primary' as const } : { plain: true as const, dimColor: true })}
+          label={shown.isAutoSkip === true ? '⏭ Auto' : '⏭'}
+          onPress={async () => {
+            const isOn = (await read($, settings)).isAutoSkip !== true
+            await saveSettings($, now => ({ ...now, isAutoSkip: isOn }))
+            if (isOn) await skip($)
+            $.ui.toast(isOn ? 'Auto-skip on: straight to the answer, no voice-over.' : 'Auto-skip off: Bob reads answers again.')
+          }}
         />
         <Button
           key="off"
